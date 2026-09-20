@@ -32,9 +32,6 @@ test('public renderer escapes representative user-controlled status content befo
   const escaped=context.__escape(hostile);
   assert.equal(escaped.includes('<img'),false);assert.equal(escaped.includes('<script>'),false);assert.ok(escaped.includes('&lt;img'));assert.ok(escaped.includes('&lt;script&gt;'));
 
-  const publicSection=source.slice(source.indexOf('function publicIncidentCard'),source.indexOf('async function renderRoute'));
-  for(const required of [
-    'esc(incident.title)', 'esc(update.message)', 'esc(latest.message)', 'publicHeader(data.page.name)', 'esc(name)',
-    'esc(data.page.branding?.description', 'esc(component.name)'
-  ]) assert.ok(publicSection.includes(required),`public renderer must escape ${required}`);
+  const publicSection=source.slice(source.indexOf('async function renderPublic'),source.indexOf('async function renderRoute'));
+  for(const required of ['esc(incident.title)','esc(u.message)','esc(data.page.name)','esc(data.page.branding?.description','esc(c.name)','esc(i.title)','esc(i.updates.at(-1).message)'])assert.ok(publicSection.includes(required),`public renderer must escape ${required}`);
 });
