@@ -1,0 +1,5 @@
+import { readdir,readFile,stat } from 'node:fs/promises';import path from 'node:path';
+const roots=['apps','packages','docs','tests','scripts','.github'];const rootFiles=['README.md','Dockerfile','docker-compose.yml','package.json','package-lock.json','.env.example'];const patterns=[/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,/AKIA[0-9A-Z]{16}/,/\bsk-[A-Za-z0-9_-]{20,}\b/,/https:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\/\d{15,}\/[A-Za-z0-9._-]{40,}/];
+async function walk(dir){const out=[];for(const e of await readdir(dir)){const f=path.join(dir,e);const s=await stat(f);if(s.isDirectory())out.push(...await walk(f));else out.push(f)}return out}
+const findings=[];const files=[...rootFiles];for(const root of roots)files.push(...await walk(root));for(const file of files){let text;try{text=await readFile(file,'utf8')}catch{continue}for(const re of patterns)if(re.test(text))findings.push(`${file}: ${re}`)}
+if(findings.length){console.error('Potential committed secrets found:\n'+findings.join('\n'));process.exit(1)}console.log('Secret scan passed: no known credential patterns detected.');

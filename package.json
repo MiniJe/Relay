@@ -1,0 +1,26 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open-source incident lifecycle and status communication platform.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node apps/api/src/server.mjs",
+    "start": "node apps/api/src/server.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:unit": "node --test tests/domain.test.mjs tests/security.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 tests/api.integration.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e.test.mjs",
+    "migrate": "node packages/database/migrate.mjs",
+    "seed": "node packages/database/seed.mjs",
+    "check:secrets": "node scripts/secret-scan.mjs",
+    "verify:production": "node scripts/production-e2e.mjs initial",
+    "verify:restart": "node scripts/production-e2e.mjs restart",
+    "verify": "npm run build && npm test && npm run check:secrets"
+  },
+  "dependencies": {
+    "postgres": "3.4.7"
+  }
+}
