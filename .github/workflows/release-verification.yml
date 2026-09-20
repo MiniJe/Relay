@@ -3,6 +3,8 @@ name: release-verification
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -99,6 +101,12 @@ jobs:
         run: |
           curl --fail --silent --show-error http://127.0.0.1:4000/ | grep -qi relay
           curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/openapi.json >/tmp/openapi.json
+
+      - name: Real-browser boot and routing verification
+        env:
+          RELAY_BROWSER: /usr/bin/google-chrome
+          RELAY_BROWSER_SCREENSHOT_DIR: /tmp/relay-browser-smoke
+        run: npm run verify:browser
 
       - name: Production PostgreSQL-backed E2E
         run: npm run verify:production
