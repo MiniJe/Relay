@@ -56,12 +56,18 @@ jobs:
           base64 -d /tmp/relay-candidate.b64 > /tmp/relay-candidate.zip
           echo "2f9df315de5d9d07904f33bd9f3edf09eb6670d3cf1384443f3b3ee71e64e139  /tmp/relay-candidate.zip" | sha256sum -c -
 
+          cp .github/workflows/bootstrap-relay.yml /tmp/bootstrap-relay.yml
+
           rm -rf /tmp/relay-candidate
           mkdir -p /tmp/relay-candidate
           unzip -q /tmp/relay-candidate.zip -d /tmp/relay-candidate
 
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/relay-candidate/. .
+
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp /tmp/bootstrap-relay.yml .github/workflows/bootstrap-relay.yml
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
