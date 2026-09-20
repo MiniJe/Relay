@@ -8,6 +8,13 @@ const mime = {
   '.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.ico':'image/x-icon','.txt':'text/plain; charset=utf-8'
 };
 
+const appDocumentRoutes = new Set([
+  '/app','/app/','/app/services','/app/components','/app/incidents','/app/status-pages','/app/settings'
+]);
+const appIncidentRoute = /^\/app\/incidents\/[a-zA-Z0-9_-]+\/?$/;
+const statusPageRoute = /^\/status\/[a-z0-9-]+\/?$/;
+const statusIncidentRoute = /^\/status\/[a-z0-9-]+\/incidents\/[a-zA-Z0-9_-]+\/?$/;
+
 export async function readJson(req, maxBytes = 1_000_000) {
   let size=0; const chunks=[];
   for await (const chunk of req) {
@@ -40,20 +47,44 @@ export function assertMutationOrigin(req, appOrigin) {
   if (origin !== appOrigin) throw domainError('ORIGIN_REJECTED','Cross-origin state change rejected.',403);
 }
 
+function isDocumentRoute(pathname) {
+  return pathname === '/' || pathname === '/signin' || pathname === '/register' ||
+    appDocumentRoutes.has(pathname) || appIncidentRoute.test(pathname) ||
+    statusPageRoute.test(pathname) || statusIncidentRoute.test(pathname);
+}
+
+function safeStaticPath(staticDir, pathname) {
+  const staticRoot = path.resolve(staticDir);
+  const normalized = path.posix.normalize(pathname).replace(/^\/+/, '');
+  const target = path.resolve(staticRoot, normalized);
+  const relative = path.relative(staticRoot, target);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  return target;
+}
+
 export async function serveStatic(req,res,staticDir) {
   const url=new URL(req.url,'http://relay.local');
-  let pathname=decodeURIComponent(url.pathname);
+  let pathname;
+  try { pathname=decodeURIComponent(url.pathname); }
+  catch { return false; }
   if (pathname.startsWith('/api/')) return false;
-  let target;
-  if (pathname === '/' || pathname === '/signin' || pathname === '/register' || pathname.startsWith('/app') || pathname.startsWith('/status/')) target=path.join(staticDir,'index.html');
-  else {
-    const normalized=path.normalize(pathname).replace(/^([.][.][/\\])+/, '').replace(/^[/\\]+/,'');
-    target=path.join(staticDir,normalized);
-    if (!target.startsWith(path.resolve(staticDir))) return false;
-  }
+
+  const isDocument = isDocumentRoute(pathname);
+  const target = isDocument ? path.join(path.resolve(staticDir),'index.html') : safeStaticPath(staticDir,pathname);
+  if (!target) return false;
+
   try {
     const info=await stat(target); if(!info.isFile())return false;
-    res.writeHead(200,{'content-type':mime[path.extname(target)]??'application/octet-stream','content-length':info.size,'x-content-type-options':'nosniff','referrer-policy':'same-origin','x-frame-options':'DENY','content-security-policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"});
+    const type=mime[path.extname(target)]??'application/octet-stream';
+    res.writeHead(200,{
+      'content-type':type,
+      'content-length':info.size,
+      'cache-control':isDocument?'no-store':'no-cache',
+      'x-content-type-options':'nosniff',
+      'referrer-policy':'same-origin',
+      'x-frame-options':'DENY',
+      'content-security-policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    });
     createReadStream(target).pipe(res); return true;
   } catch { return false; }
 }
