@@ -1,0 +1,35 @@
+name: Bootstrap Relay 0.1
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout bootstrap repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rehydrate exact Relay 0.1 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .relay-bootstrap/part-* | base64 -d > /tmp/relay-candidate.zip
+          echo "2f9df315de5d9d07904f33bd9f3edf09eb6670d3cf1384443f3b3ee71e64e139  /tmp/relay-candidate.zip" | sha256sum -c -
+          rm -rf /tmp/relay-candidate
+          mkdir -p /tmp/relay-candidate
+          unzip -q /tmp/relay-candidate.zip -d /tmp/relay-candidate
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/relay-candidate/. .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: publish Relay 0.1 verification candidate"
+          git push origin HEAD:main
