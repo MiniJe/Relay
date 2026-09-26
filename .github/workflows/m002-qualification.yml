@@ -1,0 +1,175 @@
+name: relay-m002-qualification
+
+# Relay 0.2 / RLY-0.2-M-002 qualification on a feature branch.
+#
+# `release-verification.yml` deliberately runs only for `main` (pushes and PRs
+# targeting it). The M-002 stack is based on `arena/01a0dd5f-relay`, so it can
+# never trigger that workflow, and the sandbox that produced the branch has no
+# Docker or browser. This workflow therefore runs the same real-runtime gates on
+# the stacked branch: real PostgreSQL, a real Docker Compose deployment, a real
+# Chrome browser, production E2E, container restart recovery and the
+# PostgreSQL worker concurrency qualification.
+
+on:
+  push:
+    branches: ['arena/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-m002-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  m002-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: relay_test
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U relay -d relay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://relay:relay_test_password@127.0.0.1:5432/relay_test
+      POSTGRES_PASSWORD: relay_compose_password
+      APP_ORIGIN: http://127.0.0.1:4000
+      COOKIE_SECURE: "false"
+      ALERT_INGEST_KEY: relay-ci-alert-key-not-production
+      INTEGRATION_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SEED_ADMIN_EMAIL: admin@relay.local
+      SEED_ADMIN_PASSWORD: relay-ci-seed-password-123
+      SEED_ORG_NAME: Relay CI
+      RELAY_VERIFY_BASE_URL: http://127.0.0.1:4000
+      RELAY_VERIFY_STATE_FILE: /tmp/relay-production-e2e.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Clean dependency install
+        run: npm ci
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Build
+        run: npm run build
+
+      - name: Fresh PostgreSQL migration
+        run: npm run migrate
+
+      - name: Automated tests with PostgreSQL contract
+        run: npm test
+
+      - name: Relay 0.1 to 0.2 migration upgrade contract (002 → 003)
+        run: npm run verify:migration
+
+      - name: Real-PostgreSQL worker concurrency, lease and restart qualification
+        run: node --test tests/worker.qualification.test.mjs
+
+      - name: On-call determinism under a non-UTC process timezone
+        run: TZ=Pacific/Kiritimati node --test tests/oncall.test.mjs
+
+      - name: Secret scan
+        run: npm run check:secrets
+
+      - name: Build Relay Docker image
+        run: docker compose build --no-cache relay
+
+      - name: Start Docker Compose deployment
+        run: docker compose up -d
+
+      - name: Inspect containers
+        run: docker compose ps
+
+      - name: Wait for Relay health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/health >/tmp/relay-health.json; then
+              cat /tmp/relay-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --no-color relay postgres
+          exit 1
+
+      - name: Verify UI and API reachability
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:4000/ | grep -qi relay
+          curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/openapi.json >/tmp/openapi.json
+
+      - name: Verify reported release version, OpenAPI surface and operator hooks
+        run: npm run verify:surface
+
+      - name: Real-browser boot, delivery and escalation verification
+        env:
+          RELAY_BROWSER: /usr/bin/google-chrome
+          RELAY_BROWSER_SCREENSHOT_DIR: /tmp/relay-browser-smoke
+          # The smoke run ingests a real alert through the keyed endpoint so the
+          # alerts table, acknowledgement action, alert-detail delivery audit and
+          # escalation views are verified in a browser rather than only over HTTP.
+          ALERT_INGEST_KEY: relay-ci-alert-key-not-production
+        run: |
+          set +e
+          npm run verify:browser > /tmp/relay-browser-smoke.log 2>&1
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            grep -E '^FAIL' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' | head -10
+            tail -c 3200 /tmp/relay-browser-smoke.log | tr '\n' '~' | sed 's/^/::error::smoke-tail| /'
+          fi
+          exit $code
+
+      - name: Production PostgreSQL-backed E2E (delivery audit, attempts, retry, escalation)
+        run: npm run verify:production
+
+      - name: Restart Relay application container
+        run: docker compose restart relay
+
+      - name: Wait for Relay after restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --no-color relay postgres
+          exit 1
+
+      - name: Verify delivery, attempt and escalation persistence after restart
+        run: npm run verify:restart
+
+      - name: Final container state
+        run: docker compose ps
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color relay postgres || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans || true
