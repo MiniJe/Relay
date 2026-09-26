@@ -1,4 +1,5 @@
 import { COMPONENT_STATES, INCIDENT_STATUSES, ROLES, SEVERITIES, domainError, slugify } from './domain.mjs';
+import { MAX_ROTATION_INTERVAL_MINUTES, MIN_ROTATION_INTERVAL_MINUTES, assertTimeZone } from './oncall.mjs';
 
 export function object(value, name = 'body') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw domainError('VALIDATION_ERROR', `${name} must be an object.`, 400);
@@ -124,3 +125,174 @@ export function statusPageInput(body) {
 }
 
 export function role(value) { return enumValue(value, 'role', ROLES); }
+
+// ---------------------------------------------------------------------------
+// Relay 0.2 — alert routing and on-call input validation.
+//
+// Every value that reaches persistence or the routing engine is validated here
+// so that malformed timezones, non-integer intervals, hostile rule conditions
+// and malformed Discord identifiers are rejected before they can influence a
+// routing decision.
+// ---------------------------------------------------------------------------
+
+export function timestamp(value, name, { optional = false, required = false } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (optional) return undefined;
+    throw domainError('VALIDATION_ERROR', `${name} is required.`, 400);
+  }
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw domainError('VALIDATION_ERROR', `${name} must be a valid ISO-8601 timestamp.`, 400);
+  return parsed.toISOString();
+}
+
+export function integer(value, name, { min = 0, max = Number.MAX_SAFE_INTEGER, optional = false, fallback } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (optional) return fallback;
+    throw domainError('VALIDATION_ERROR', `${name} is required.`, 400);
+  }
+  const parsed = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isInteger(parsed)) throw domainError('VALIDATION_ERROR', `${name} must be a whole number.`, 400);
+  if (parsed < min || parsed > max) throw domainError('VALIDATION_ERROR', `${name} must be between ${min} and ${max}.`, 400);
+  return parsed;
+}
+
+export function booleanValue(value, name, { fallback = true } = {}) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== 'boolean') throw domainError('VALIDATION_ERROR', `${name} must be a boolean.`, 400);
+  return value;
+}
+
+/** IANA timezone identifier, validated without consulting the host timezone. */
+export function timeZone(value) {
+  const raw = string(value, 'timeZone', { min: 2, max: 64 });
+  return assertTimeZone(raw);
+}
+
+/**
+ * Discord user identifiers are numeric snowflakes. Accepting only digits keeps
+ * the value inert: it can never carry Markdown, a mention-everyone payload, or
+ * anything else into a Discord message body.
+ */
+export function discordUserId(value) {
+  const raw = string(value, 'discordUserId', { min: 15, max: 25 });
+  if (!/^[0-9]{15,25}$/.test(raw)) throw domainError('VALIDATION_ERROR', 'discordUserId must be a numeric Discord snowflake identifier.', 400);
+  return raw;
+}
+
+/** Free-form severity tokens. Matching is case-insensitive; nothing is executed. */
+export function severityTokens(value, name = 'matchSeverities', { max = 20 } = {}) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw domainError('VALIDATION_ERROR', `${name} must be an array of severity values.`, 400);
+  if (value.length > max) throw domainError('VALIDATION_ERROR', `${name} supports at most ${max} entries.`, 400);
+  const out = [];
+  for (const item of value) {
+    const token = string(item, name, { min: 1, max: 40 });
+    if (!out.some((existing) => existing.toLowerCase() === token.toLowerCase())) out.push(token);
+  }
+  return out;
+}
+
+export function teamInput(body) {
+  body = object(body);
+  const name = string(body.name, 'name', { min: 2, max: 120 });
+  return {
+    name,
+    slug: body.slug ? slugify(string(body.slug, 'slug', { max: 80 })) : slugify(name),
+    description: string(body.description ?? '', 'description', { min: 0, max: 2000, optional: true }) ?? ''
+  };
+}
+
+export function teamPatch(body) {
+  body = object(body);
+  const out = {};
+  if ('name' in body) out.name = string(body.name, 'name', { min: 2, max: 120 });
+  if ('slug' in body) out.slug = slugify(string(body.slug, 'slug', { min: 1, max: 80 }));
+  if ('description' in body) out.description = string(body.description ?? '', 'description', { min: 0, max: 2000, optional: true }) ?? '';
+  if (out.slug !== undefined && !out.slug) throw domainError('VALIDATION_ERROR', 'Team slug is invalid.', 400);
+  return out;
+}
+
+export function servicePatch(body) {
+  body = object(body);
+  const out = {};
+  if ('name' in body) out.name = string(body.name, 'name', { min: 2, max: 120 });
+  if ('slug' in body) out.slug = slugify(string(body.slug, 'slug', { min: 1, max: 80 }));
+  if ('description' in body) out.description = string(body.description ?? '', 'description', { min: 0, max: 2000, optional: true }) ?? '';
+  if ('operationalState' in body) out.operationalState = enumValue(body.operationalState, 'operationalState', COMPONENT_STATES);
+  // `ownerTeamId: null` explicitly clears ownership; omission leaves it alone.
+  if ('ownerTeamId' in body) out.ownerTeamId = body.ownerTeamId === null || body.ownerTeamId === '' ? null : id(body.ownerTeamId, 'ownerTeamId');
+  return out;
+}
+
+export function scheduleInput(body) {
+  body = object(body);
+  const participantUserIds = ids(body.participantUserIds ?? [], 'participantUserIds', { max: 50 });
+  if (!participantUserIds.length) throw domainError('VALIDATION_ERROR', 'An on-call schedule needs at least one rotation participant.', 400);
+  return {
+    name: string(body.name, 'name', { min: 2, max: 120 }),
+    teamId: id(body.teamId, 'teamId'),
+    timeZone: timeZone(body.timeZone ?? 'UTC'),
+    enabled: booleanValue(body.enabled, 'enabled', { fallback: true }),
+    rotationStartsAt: timestamp(body.rotationStartsAt, 'rotationStartsAt', { optional: true }) ?? new Date().toISOString(),
+    rotationIntervalMinutes: integer(body.rotationIntervalMinutes, 'rotationIntervalMinutes', { min: MIN_ROTATION_INTERVAL_MINUTES, max: MAX_ROTATION_INTERVAL_MINUTES }),
+    participantUserIds
+  };
+}
+
+export function schedulePatch(body) {
+  body = object(body);
+  const out = {};
+  if ('name' in body) out.name = string(body.name, 'name', { min: 2, max: 120 });
+  if ('timeZone' in body) out.timeZone = timeZone(body.timeZone);
+  if ('enabled' in body) out.enabled = booleanValue(body.enabled, 'enabled');
+  if ('rotationStartsAt' in body) out.rotationStartsAt = timestamp(body.rotationStartsAt, 'rotationStartsAt');
+  if ('rotationIntervalMinutes' in body) out.rotationIntervalMinutes = integer(body.rotationIntervalMinutes, 'rotationIntervalMinutes', { min: MIN_ROTATION_INTERVAL_MINUTES, max: MAX_ROTATION_INTERVAL_MINUTES });
+  if ('participantUserIds' in body) {
+    const participantUserIds = ids(body.participantUserIds, 'participantUserIds', { max: 50 });
+    if (!participantUserIds.length) throw domainError('VALIDATION_ERROR', 'An on-call schedule needs at least one rotation participant.', 400);
+    out.participantUserIds = participantUserIds;
+  }
+  return out;
+}
+
+export function overrideInput(body) {
+  body = object(body);
+  const startsAt = timestamp(body.startsAt, 'startsAt');
+  const endsAt = timestamp(body.endsAt, 'endsAt');
+  if (new Date(endsAt).getTime() <= new Date(startsAt).getTime()) {
+    throw domainError('VALIDATION_ERROR', 'startsAt must be strictly before endsAt.', 400);
+  }
+  return {
+    replacementUserId: id(body.replacementUserId, 'replacementUserId'),
+    startsAt,
+    endsAt,
+    reason: string(body.reason ?? '', 'reason', { min: 0, max: 500, optional: true }) ?? ''
+  };
+}
+
+export function routingRuleInput(body) {
+  body = object(body);
+  return {
+    name: string(body.name, 'name', { min: 2, max: 160 }),
+    enabled: booleanValue(body.enabled, 'enabled', { fallback: true }),
+    priority: integer(body.priority ?? 100, 'priority', { min: 0, max: 100_000 }),
+    matchServiceId: body.matchServiceId ? id(body.matchServiceId, 'matchServiceId') : null,
+    matchSource: body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null,
+    matchSeverities: severityTokens(body.matchSeverities),
+    targetKind: enumValue(body.targetKind ?? 'ONCALL_SCHEDULE', 'targetKind', ['ONCALL_SCHEDULE']),
+    targetScheduleId: id(body.targetScheduleId, 'targetScheduleId')
+  };
+}
+
+export function routingRulePatch(body) {
+  body = object(body);
+  const out = {};
+  if ('name' in body) out.name = string(body.name, 'name', { min: 2, max: 160 });
+  if ('enabled' in body) out.enabled = booleanValue(body.enabled, 'enabled');
+  if ('priority' in body) out.priority = integer(body.priority, 'priority', { min: 0, max: 100_000 });
+  if ('matchServiceId' in body) out.matchServiceId = body.matchServiceId ? id(body.matchServiceId, 'matchServiceId') : null;
+  if ('matchSource' in body) out.matchSource = body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null;
+  if ('matchSeverities' in body) out.matchSeverities = severityTokens(body.matchSeverities);
+  if ('targetScheduleId' in body) out.targetScheduleId = id(body.targetScheduleId, 'targetScheduleId');
+  return out;
+}

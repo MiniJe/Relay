@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Open-source incident lifecycle and status communication platform.",
@@ -12,16 +12,18 @@
     "start": "node apps/api/src/server.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "test:unit": "node --test tests/domain.test.mjs tests/security.test.mjs",
-    "test:integration": "node --test --test-concurrency=1 tests/api.integration.test.mjs",
-    "test:e2e": "node --test --test-concurrency=1 tests/e2e.test.mjs",
+    "test:unit": "node --test tests/domain.test.mjs tests/security.test.mjs tests/oncall.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 tests/api.integration.test.mjs tests/routing.integration.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e.test.mjs tests/routing.e2e.test.mjs",
     "migrate": "node packages/database/migrate.mjs",
     "seed": "node packages/database/seed.mjs",
     "check:secrets": "node scripts/secret-scan.mjs",
     "verify:production": "node scripts/production-e2e.mjs initial",
     "verify:restart": "node scripts/production-e2e.mjs restart",
     "verify": "npm run build && npm test && npm run check:secrets",
-    "verify:browser": "node scripts/browser-smoke.mjs"
+    "verify:migration": "node --test tests/migration-upgrade.test.mjs",
+    "verify:browser": "node scripts/browser-smoke.mjs",
+    "verify:surface": "node scripts/verify-release-surface.mjs"
   },
   "dependencies": {
     "postgres": "3.4.7"

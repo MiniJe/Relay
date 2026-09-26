@@ -43,6 +43,23 @@ async function verifyHealthAndUi() {
   assert.match(await ui.text(), /Relay/i, 'UI should contain Relay branding');
 }
 
+/** POST to the keyed alert-intake endpoint, which is not session-authenticated. */
+async function postAlert(alertKey, body, keyOverride) {
+  const res = await fetch(`${baseUrl}/api/v1/alerts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-relay-alert-key': keyOverride ?? alertKey },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+  let json = {};
+  if (text) { try { json = JSON.parse(text); } catch { throw new Error(`POST /api/v1/alerts returned non-JSON ${res.status}: ${text.slice(0, 500)}`); } }
+  return { status: res.status, json };
+}
+
+const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
+const HOUR = 3_600_000;
+const DAY = 86_400_000;
+
 async function login(client, email, password) {
   const result = await client.request('/api/v1/auth/login', {
     method: 'POST',
@@ -198,6 +215,240 @@ async function initial() {
   assert.ok(incident.updates.some((u) => u.isPublic && u.message === publicMessage));
   assert.equal(incident.postmortem.title, postmortemPayload.title);
 
+  // =========================================================================
+  // Relay 0.2 - alert routing and on-call foundation
+  // =========================================================================
+  const orgBase = `/api/v1/organizations/${organization.id}`;
+
+  r = await client.request(`${orgBase}/members`, { expected: 200 });
+  assert.ok(r.json.data.some((m) => m.userId === user.id && m.role === 'OWNER'), 'member roster must include the owner');
+
+  r = await client.request(`${orgBase}/teams`, {
+    method: 'POST',
+    body: { name: `Release Verification Team ${marker}`, description: 'Owns the release verification service.' },
+    expected: 201
+  });
+  const team = r.json.data;
+  assert.equal(team.slug, `release-verification-team-${marker}`.toLowerCase());
+
+  await client.request(`${orgBase}/teams/${team.id}/members`, { method: 'POST', body: { userId: user.id }, expected: 201 });
+  r = await client.request(`${orgBase}/teams/${team.id}/members`, { method: 'POST', body: { userId: user.id }, expected: 200 });
+  assert.equal(r.json.data.alreadyMember, true, 'adding an existing team member must be a reported no-op');
+  r = await client.request(`${orgBase}/teams/${team.id}`, { expected: 200 });
+  assert.equal(r.json.data.members.length, 1, 'adding an existing team member must be idempotent');
+  assert.equal(r.json.data.members[0].userId, user.id);
+
+  r = await client.request(`${orgBase}/teams/${team.id}/members`, { method: 'POST', body: { userId: crypto.randomUUID() }, expected: 400 });
+  assert.equal(r.json.error.code, 'INVALID_REFERENCE', 'a user outside the organization can never join a team');
+
+  r = await client.request(`${orgBase}/services/${service.id}`, { method: 'PATCH', body: { ownerTeamId: team.id }, expected: 200 });
+  assert.equal(r.json.data.ownerTeamId, team.id, 'service ownership must persist');
+  r = await client.request(`${orgBase}/teams/${team.id}`, { expected: 200 });
+  assert.ok(r.json.data.services.some((x) => x.id === service.id), 'the team must list the services it owns');
+
+  // A daily rotation anchored one hour ago, in a non-UTC zone.
+  const rotationStartsAt = new Date(Date.now() - HOUR).toISOString();
+  r = await client.request(`${orgBase}/oncall/schedules`, {
+    method: 'POST',
+    body: {
+      name: 'Release verification on-call', teamId: team.id, timeZone: 'Europe/Bucharest',
+      rotationStartsAt, rotationIntervalMinutes: 1440, participantUserIds: [user.id]
+    },
+    expected: 201
+  });
+  const schedule = r.json.data;
+  assert.equal(schedule.timeZone, 'Europe/Bucharest');
+  assert.deepEqual(schedule.participants.map((p) => p.userId), [user.id]);
+
+  r = await client.request(`${orgBase}/oncall/schedules`, {
+    method: 'POST',
+    body: { name: 'Bad timezone', teamId: team.id, timeZone: 'Not/AZone', rotationStartsAt, rotationIntervalMinutes: 1440, participantUserIds: [user.id] },
+    expected: 400
+  });
+  assert.equal(r.json.error.code, 'INVALID_TIMEZONE', 'a malformed timezone must be rejected before persistence');
+
+  r = await client.request(`${orgBase}/oncall/schedules`, {
+    method: 'POST',
+    body: { name: 'Bad roster', teamId: team.id, timeZone: 'UTC', rotationStartsAt, rotationIntervalMinutes: 1440, participantUserIds: [crypto.randomUUID()] },
+    expected: 400
+  });
+  assert.equal(r.json.error.code, 'INVALID_PARTICIPANT', 'every rotation participant must be a team member');
+
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/oncall`, { expected: 200 });
+  assert.equal(r.json.data.resolved, true);
+  assert.equal(r.json.data.userId, user.id, 'the rotation must resolve its first participant');
+  assert.equal(r.json.data.source, 'ROTATION');
+  assert.ok(r.json.data.periodStartsAt && r.json.data.periodEndsAt);
+
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/oncall?at=${encodeURIComponent(iso(DAY + HOUR))}`, { expected: 200 });
+  assert.equal(r.json.data.userId, user.id, 'a single-participant rotation is stable across handoffs');
+
+  r = await client.request(`${orgBase}/oncall/state`, { expected: 200 });
+  assert.equal(r.json.data.oncall[0].current.userId, user.id, 'the state endpoint must agree with the schedule endpoint');
+  assert.equal(r.json.data.oncall[0].schedule.timeZone, 'Europe/Bucharest');
+
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/overrides`, {
+    method: 'POST',
+    body: { replacementUserId: user.id, startsAt: iso(HOUR), endsAt: iso(2 * HOUR), reason: 'Release verification overlap check.' },
+    expected: 201
+  });
+  const overlapProbe = r.json.data;
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/overrides`, {
+    method: 'POST',
+    body: { replacementUserId: user.id, startsAt: iso(90 * 60_000), endsAt: iso(3 * HOUR), reason: 'Clash.' },
+    expected: 409
+  });
+  assert.equal(r.json.error.code, 'OVERRIDE_OVERLAP', 'overlapping overrides must be refused deterministically');
+
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/oncall?at=${encodeURIComponent(iso(90 * 60_000))}`, { expected: 200 });
+  assert.equal(r.json.data.source, 'OVERRIDE');
+  assert.equal(r.json.data.overrideId, overlapProbe.id);
+
+  await client.request(`${orgBase}/oncall/overrides/${overlapProbe.id}`, { method: 'DELETE', expected: 204 });
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/oncall?at=${encodeURIComponent(iso(90 * 60_000))}`, { expected: 200 });
+  assert.equal(r.json.data.source, 'ROTATION', 'the rotation must resume unchanged once the override ends');
+
+  // A second, surviving override so restart mode can prove override durability.
+  r = await client.request(`${orgBase}/oncall/schedules/${schedule.id}/overrides`, {
+    method: 'POST',
+    body: { replacementUserId: user.id, startsAt: iso(DAY), endsAt: iso(DAY + 2 * HOUR), reason: 'Release verification durability override.' },
+    expected: 201
+  });
+  const durableOverride = r.json.data;
+
+  r = await client.request(`${orgBase}/routing-rules`, {
+    method: 'POST',
+    body: {
+      name: 'Release verification criticals', priority: 10, matchServiceId: service.id,
+      matchSource: 'release-verifier', matchSeverities: ['critical'], targetScheduleId: schedule.id
+    },
+    expected: 201
+  });
+  const rule = r.json.data;
+  assert.equal(rule.scheduleName, schedule.name);
+
+  r = await client.request(`${orgBase}/routing-rules`, {
+    method: 'POST',
+    body: { name: 'Release verification catch-all', priority: 900, targetScheduleId: schedule.id },
+    expected: 201
+  });
+  const catchAll = r.json.data;
+
+  r = await client.request(`${orgBase}/routing-rules`, { expected: 200 });
+  assert.deepEqual(r.json.data.map((x) => x.name), [rule.name, catchAll.name], 'rules must be ordered by explicit priority');
+
+  const alertKey = process.env.ALERT_INGEST_KEY;
+  let alert = null;
+  let escalatedIncident = null;
+  if (!alertKey) {
+    console.log('Production E2E NOTE: ALERT_INGEST_KEY is not set, so alert intake/routing/acknowledgement verification is skipped. Configuration, on-call resolution and rule ordering were still verified.');
+  } else {
+    const alertPayload = {
+      organizationSlug: organization.slug, source: 'release-verifier', externalId: `release-${marker}`,
+      title: `Release verification alert ${marker}`, description: 'Production-path alert routing verification.',
+      severity: 'critical', serviceIdentifier: service.slug, metadata: { marker },
+      timestamp: new Date(Date.now() - 60_000).toISOString()
+    };
+    const intake = await postAlert(alertKey, alertPayload);
+    assert.equal(intake.status, 202, `alert intake must return 202, got ${intake.status}: ${JSON.stringify(intake.json)}`);
+    alert = intake.json.data;
+    assert.equal(alert.duplicate, false);
+    assert.equal(alert.serviceId, service.id, 'the service identifier must resolve to a stored service');
+    assert.equal(JSON.stringify(intake.json).includes(alertKey), false, 'the ingest key must never be echoed');
+
+    const routing = alert.routing;
+    assert.ok(routing, 'intake must return the routing record');
+    assert.equal(routing.resolution, 'ROUTED');
+    assert.equal(routing.ruleId, rule.id);
+    assert.equal(routing.ruleName, rule.name);
+    assert.equal(routing.scheduleId, schedule.id);
+    assert.equal(routing.teamName, team.name);
+    assert.equal(routing.oncallUserId, user.id, 'the responder on call at the routing instant must be selected');
+    assert.equal(routing.responderSource, 'ROTATION');
+    assert.ok(['SENT', 'FAILED', 'SKIPPED_NO_INTEGRATION', 'SKIPPED_DISABLED'].includes(routing.notificationStatus), `unexpected notification status ${routing.notificationStatus}`);
+    assert.equal(routing.acknowledgedAt, null, 'routing must never acknowledge on the operator\'s behalf');
+    assert.equal(routing.incidentId, null, 'routing must never create an incident');
+
+    const replay = await postAlert(alertKey, alertPayload);
+    assert.equal(replay.status, 202);
+    assert.equal(replay.json.data.duplicate, true, 'a replayed alert must be reported as a duplicate');
+    assert.equal(replay.json.data.id, alert.id);
+    assert.equal(replay.json.data.routing.id, routing.id, 'a replay must never create a second routing record');
+
+    const rejected = await postAlert(alertKey, alertPayload, 'definitely-the-wrong-key');
+    assert.equal(rejected.status, 401, 'an invalid ingest key must be rejected');
+
+    r = await client.request(`${orgBase}/alerts`, { expected: 200 });
+    const listed = r.json.data.find((x) => x.id === alert.id);
+    assert.ok(listed?.routing, 'the alert list must join the routing record');
+    assert.equal(listed.routing.resolution, 'ROUTED');
+    assert.equal(listed.serviceName, service.name);
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/routing`, { expected: 200 });
+    assert.equal(r.json.data.oncallUserId, user.id);
+
+    r = await client.request(`${orgBase}/routings`, { expected: 200 });
+    assert.ok(r.json.data.some((x) => x.alertId === alert.id), 'the routing audit trail must be queryable');
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/acknowledge`, { method: 'POST', body: { note: `Release verification acknowledgement ${marker}` }, expected: 200 });
+    assert.equal(r.json.alreadyAcknowledged, false);
+    assert.equal(r.json.data.acknowledgedByUserId, user.id);
+    r = await client.request(`${orgBase}/alerts/${alert.id}/acknowledge`, { method: 'POST', body: {}, expected: 200 });
+    assert.equal(r.json.alreadyAcknowledged, true, 're-acknowledging must be an idempotent no-op');
+    assert.equal(r.json.data.acknowledgedByUserId, user.id);
+
+    r = await client.request(`${orgBase}/incidents`, { expected: 200 });
+    assert.equal(r.json.data.length, 1, 'acknowledgement must not create an incident');
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/incidents`, {
+      method: 'POST',
+      body: { title: `Escalated from alert ${marker}`, severity: 'SEV3', summary: 'Explicit human escalation from a routed alert.', affectedComponentIds: [component.id] },
+      expected: 201
+    });
+    escalatedIncident = r.json.data;
+    assert.deepEqual(escalatedIncident.affectedServiceIds, [service.id], 'the alert service must seed the incident scope');
+    assert.ok(escalatedIncident.timeline.some((e) => e.metadata?.sourceAlertId === alert.id), 'the incident must record which alert it came from');
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/incidents`, { method: 'POST', body: { title: 'Duplicate escalation', severity: 'SEV4' }, expected: 409 });
+    assert.equal(r.json.error.code, 'ALERT_ALREADY_ESCALATED');
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/routing`, { expected: 200 });
+    assert.equal(r.json.data.incidentId, escalatedIncident.id, 'the routing record must link the escalated incident');
+
+    // Public boundary: on-call machinery must never appear publicly.
+    r = await client.request(`/api/v1/public/status/${statusSlug}`, { expected: 200 });
+    const publicJson = JSON.stringify(r.json);
+    assert.equal(publicJson.includes('Escalated from alert'), true, 'the escalated incident is published like any other incident');
+    for (const internal of [team.name, schedule.name, rule.name, catchAll.name, alertKey, internalMessage, 'release-verifier', durableOverride.reason]) {
+      assert.equal(publicJson.includes(internal), false, `public status must not leak ${internal}`);
+    }
+
+    r = await client.request(`${orgBase}/incidents/${escalatedIncident.id}/resolve`, { method: 'POST', body: {}, expected: 200 });
+    assert.equal(r.json.data.status, 'RESOLVED');
+    r = await client.request(`${orgBase}/alerts/${alert.id}/routing`, { expected: 200 });
+    assert.equal(r.json.data.acknowledgedByUserId, user.id, 'incident resolution must not un-acknowledge the alert');
+
+    // Historical immutability: rename everything the record references.
+    await client.request(`${orgBase}/oncall/schedules/${schedule.id}`, { method: 'PATCH', body: { name: 'Renamed schedule', rotationStartsAt: new Date(Date.now() - DAY - HOUR).toISOString() }, expected: 200 });
+    await client.request(`${orgBase}/teams/${team.id}`, { method: 'PATCH', body: { name: 'Renamed team' }, expected: 200 });
+    await client.request(`${orgBase}/routing-rules/${rule.id}`, { method: 'PATCH', body: { name: 'Renamed rule', priority: 5 }, expected: 200 });
+    await client.request(`${orgBase}/routing-rules/${catchAll.id}`, { method: 'DELETE', expected: 204 });
+
+    r = await client.request(`${orgBase}/alerts/${alert.id}/routing`, { expected: 200 });
+    assert.equal(r.json.data.oncallUserId, user.id, 'history must still name who was actually paged');
+    assert.equal(r.json.data.scheduleName, schedule.name, 'the snapshotted schedule name must not follow a rename');
+    assert.equal(r.json.data.teamName, team.name, 'the snapshotted team name must not follow a rename');
+    assert.equal(r.json.data.ruleName, rule.name, 'the snapshotted rule name must not follow a rename');
+    assert.equal(r.json.data.resolution, 'ROUTED');
+  }
+
+  // Re-read the 0.2 configuration so restart mode verifies whatever is actually
+  // persisted now, including the renames performed by the immutability checks.
+  const finalSchedule = (await client.request(`${orgBase}/oncall/schedules/${schedule.id}`, { expected: 200 })).json.data;
+  const finalTeam = (await client.request(`${orgBase}/teams/${team.id}`, { expected: 200 })).json.data;
+  const finalRules = (await client.request(`${orgBase}/routing-rules`, { expected: 200 })).json.data;
+  const finalRule = finalRules.find((x) => x.id === rule.id) ?? null;
+
   await writeFile(stateFile, JSON.stringify({
     email, password,
     userId: user.id,
@@ -209,10 +460,32 @@ async function initial() {
     incidentId: incident.id,
     internalMessage,
     publicMessage,
-    postmortemTitle: postmortemPayload.title
+    postmortemTitle: postmortemPayload.title,
+    relay02: {
+      teamId: team.id,
+      teamName: finalTeam.name,
+      scheduleId: schedule.id,
+      scheduleName: finalSchedule.name,
+      originalScheduleName: schedule.name,
+      originalTeamName: team.name,
+      rotationStartsAt: finalSchedule.rotationStartsAt,
+      timeZone: finalSchedule.timeZone,
+      rotationIntervalMinutes: finalSchedule.rotationIntervalMinutes,
+      ruleId: finalRule?.id ?? null,
+      ruleName: finalRule?.name ?? null,
+      rulePriority: finalRule?.priority ?? null,
+      originalRuleName: rule.name,
+      overrideId: durableOverride.id,
+      overrideReason: durableOverride.reason,
+      alertId: alert?.id ?? null,
+      alertExternalId: `release-${marker}`,
+      routingId: alert?.routing?.id ?? null,
+      notificationStatus: alert?.routing?.notificationStatus ?? null,
+      escalatedIncidentId: escalatedIncident?.id ?? null
+    }
   }, null, 2), { mode: 0o600 });
 
-  console.log('Production E2E PASS:', JSON.stringify({ organizationId: organization.id, incidentId: incident.id, statusSlug }));
+  console.log('Production E2E PASS:', JSON.stringify({ organizationId: organization.id, incidentId: incident.id, statusSlug, teamId: team.id, scheduleId: schedule.id, alertId: alert?.id ?? null }));
 }
 
 async function restart() {
@@ -258,7 +531,99 @@ async function restart() {
   assert.equal(r.json.data.updates.some((u) => u.message === state.publicMessage), true);
   assert.equal(JSON.stringify(r.json).includes(state.internalMessage), false, 'public incident must remain private-note free after restart');
 
-  console.log('Restart persistence PASS:', JSON.stringify({ organizationId: state.organizationId, incidentId: state.incidentId }));
+  // =========================================================================
+  // Relay 0.2 durability across a restart
+  // =========================================================================
+  const r02 = state.relay02;
+  if (!r02) throw new Error('State file has no relay02 section; re-run verify:production before verify:restart.');
+  const orgBase = `/api/v1/organizations/${state.organizationId}`;
+
+  r = await client.request(`${orgBase}/teams/${r02.teamId}`, { expected: 200 });
+  assert.equal(r.json.data.name, r02.teamName, 'the renamed team must survive restart');
+  assert.ok(r.json.data.members.some((m) => m.userId === state.userId), 'team membership must survive restart');
+  assert.ok(r.json.data.services.some((x) => x.id === state.serviceId), 'service ownership must survive restart');
+
+  r = await client.request(`${orgBase}/services`, { expected: 200 });
+  assert.equal(r.json.data.find((x) => x.id === state.serviceId).ownerTeamId, r02.teamId, 'service ownerTeamId must survive restart');
+
+  r = await client.request(`${orgBase}/oncall/schedules/${r02.scheduleId}`, { expected: 200 });
+  const schedule = r.json.data;
+  assert.equal(schedule.name, r02.scheduleName, 'the renamed schedule must survive restart');
+  assert.equal(schedule.timeZone, r02.timeZone, 'the schedule timezone must survive restart');
+  assert.equal(schedule.rotationIntervalMinutes, r02.rotationIntervalMinutes, 'the rotation interval must survive restart');
+  assert.equal(schedule.rotationStartsAt, r02.rotationStartsAt, 'the rotation anchor must survive restart exactly');
+  assert.deepEqual(schedule.participants.map((p) => p.userId), [state.userId], 'the rotation roster must survive restart');
+  assert.ok(schedule.overrides.some((o) => o.id === r02.overrideId && o.reason === r02.overrideReason), 'overrides must survive restart');
+
+  // On-call resolution must be identical after a restart: the same absolute
+  // anchor and interval on any machine at any time.
+  r = await client.request(`${orgBase}/oncall/schedules/${r02.scheduleId}/oncall`, { expected: 200 });
+  assert.equal(r.json.data.resolved, true);
+  assert.equal(r.json.data.userId, state.userId, 'on-call resolution must survive restart');
+
+  r = await client.request(`${orgBase}/oncall/state`, { expected: 200 });
+  assert.equal(r.json.data.oncall.find((x) => x.schedule.id === r02.scheduleId).current.userId, state.userId, 'the on-call state endpoint must survive restart');
+
+  if (r02.ruleId) {
+    r = await client.request(`${orgBase}/routing-rules`, { expected: 200 });
+    const rule = r.json.data.find((x) => x.id === r02.ruleId);
+    assert.ok(rule, 'the routing rule must survive restart');
+    assert.equal(rule.name, r02.ruleName, 'the rule name must survive restart');
+    assert.equal(rule.priority, r02.rulePriority, 'the reordered priority must survive restart');
+    assert.equal(rule.matchServiceId, state.serviceId, 'rule conditions must survive restart');
+    assert.deepEqual(rule.matchSeverities, ['critical'], 'rule severity conditions must survive restart as real JSON');
+    assert.equal(rule.targetScheduleId, r02.scheduleId);
+    assert.equal(r.json.data.some((x) => x.name === 'Release verification catch-all'), false, 'the deleted catch-all rule must stay deleted');
+  }
+
+  if (r02.alertId) {
+    r = await client.request(`${orgBase}/alerts`, { expected: 200 });
+    const listed = r.json.data.find((x) => x.id === r02.alertId);
+    assert.ok(listed, 'the alert must survive restart');
+    assert.equal(listed.routing.id, r02.routingId, 'the routing record must survive restart');
+    assert.equal(listed.routing.resolution, 'ROUTED');
+    assert.equal(listed.routing.oncallUserId, state.userId, 'the resolved responder must survive restart');
+    assert.equal(listed.routing.notificationStatus, r02.notificationStatus, 'the notification outcome must survive restart');
+    assert.equal(listed.routing.acknowledgedByUserId, state.userId, 'the acknowledgement must survive restart');
+    assert.ok(listed.routing.acknowledgedAt, 'the acknowledgement timestamp must survive restart');
+    assert.equal(listed.routing.incidentId, r02.escalatedIncidentId, 'the alert-to-incident link must survive restart');
+    // Snapshotted names, recorded before the restart-time renames, must not drift.
+    assert.equal(listed.routing.scheduleName, r02.originalScheduleName, 'the historical schedule snapshot must survive restart');
+    assert.equal(listed.routing.teamName, r02.originalTeamName, 'the historical team snapshot must survive restart');
+    assert.equal(listed.routing.ruleName, r02.originalRuleName, 'the historical rule snapshot must survive restart');
+    assert.equal(listed.metadata?.marker !== undefined, true, 'alert metadata must survive restart as real JSON');
+
+    r = await client.request(`${orgBase}/routings`, { expected: 200 });
+    assert.ok(r.json.data.some((x) => x.alertId === r02.alertId), 'the routing audit trail must survive restart');
+
+    r = await client.request(`${orgBase}/incidents/${r02.escalatedIncidentId}`, { expected: 200 });
+    assert.equal(r.json.data.status, 'RESOLVED');
+    assert.ok(r.json.data.timeline.some((e) => e.metadata?.sourceAlertId === r02.alertId), 'the escalation provenance must survive restart');
+
+    // Idempotency must still hold after a restart, so a late retry from a
+    // monitoring system cannot resurrect a duplicate alert or a second page.
+    const alertKey = process.env.ALERT_INGEST_KEY;
+    if (alertKey) {
+      const replay = await postAlert(alertKey, {
+        organizationSlug: (await client.request(`/api/v1/organizations/${state.organizationId}`, { expected: 200 })).json.data.slug,
+        source: 'release-verifier', externalId: r02.alertExternalId,
+        title: 'Release verification alert replay', severity: 'critical'
+      });
+      assert.equal(replay.status, 202);
+      assert.equal(replay.json.data.duplicate, true, 'a post-restart replay must still be recognised as a duplicate');
+      assert.equal(replay.json.data.id, r02.alertId);
+      assert.equal(replay.json.data.routing.id, r02.routingId, 'a post-restart replay must not create a second routing record');
+    }
+
+    r = await client.request(`/api/v1/public/status/${state.statusSlug}`, { expected: 200 });
+    const publicJson = JSON.stringify(r.json);
+    assert.equal(r.json.data.overallStatus, 'OPERATIONAL');
+    for (const internal of [r02.teamName, r02.scheduleName, r02.ruleName, r02.overrideReason, state.internalMessage]) {
+      assert.equal(publicJson.includes(internal), false, `public status must not leak ${internal} after restart`);
+    }
+  }
+
+  console.log('Restart persistence PASS:', JSON.stringify({ organizationId: state.organizationId, incidentId: state.incidentId, teamId: r02.teamId, scheduleId: r02.scheduleId, alertId: r02.alertId }));
 }
 
 if (mode === 'initial') await initial();
