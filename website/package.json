@@ -1,0 +1,1 @@
+{"name":"relay-marketing-site","version":"0.1.0","private":true,"scripts":{"dev":"node server.mjs","build":"node check.mjs","test":"node check.mjs"}}
