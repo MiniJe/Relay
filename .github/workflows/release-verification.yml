@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: relay-0.1-release-verification-${{ github.ref }}
+  group: relay-0.2-release-verification-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -70,6 +70,15 @@ jobs:
       - name: Explicit PostgreSQL schema contract
         run: node --test --test-concurrency=1 tests/postgres.contract.test.mjs
 
+      - name: Relay 0.1 to 0.2 migration upgrade contract
+        run: node --test --test-concurrency=1 tests/migration-upgrade.test.mjs
+
+      - name: On-call determinism (timezone-pinned unit contract)
+        run: TZ=Pacific/Kiritimati node --test tests/oncall.test.mjs
+
+      - name: Alert routing integration contract
+        run: node --test --test-concurrency=1 tests/routing.integration.test.mjs tests/routing.e2e.test.mjs
+
       - name: Secret scan
         run: npm run check:secrets
 
@@ -102,10 +111,17 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:4000/ | grep -qi relay
           curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/openapi.json >/tmp/openapi.json
 
+      - name: Verify reported release version and OpenAPI 0.2 surface
+        run: npm run verify:surface
+
       - name: Real-browser boot and routing verification
         env:
           RELAY_BROWSER: /usr/bin/google-chrome
           RELAY_BROWSER_SCREENSHOT_DIR: /tmp/relay-browser-smoke
+          # The smoke run ingests a real alert through the keyed endpoint so the
+          # routed-alert table, acknowledgement action and routing path are
+          # verified in a browser rather than only over HTTP.
+          ALERT_INGEST_KEY: relay-ci-alert-key-not-production
         run: |
           set +e
           npm run verify:browser > /tmp/relay-browser-smoke.log 2>&1
