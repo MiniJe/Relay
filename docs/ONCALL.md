@@ -482,3 +482,11 @@ These are boundaries, not defects, and each is recorded as deferred in
 - no alert grouping, correlation, silencing or maintenance windows beyond
   `externalId` idempotency;
 - DST shifts the local handoff time rather than the handoff duration (§4).
+
+## Escalation policy definitions (M-002 partial)
+
+Policies are organization scoped and attach to routing rules, not schedules.
+Their steps are strictly ordered by position and delay; `afterMinutes` is
+measured from the initial route. The current implementation provides policy
+configuration and snapshot materialization, but not yet the durable execution
+worker or channel delivery completion. See [ESCALATION.md](ESCALATION.md).

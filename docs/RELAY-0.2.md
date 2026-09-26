@@ -4,11 +4,12 @@ Release 0.2 turns Relay's durable alert intake into a routing system with an
 answer to the only question that matters at 03:00: **who is responsible right
 now?**
 
-This document describes the release as a whole. Milestone **RLY-0.2-M-001 —
-Alert Routing & On-Call Foundation** is the only milestone implemented so far;
-everything else in the "Deferred" sections below is explicitly *not* in the
-codebase and is listed so that reviewers can tell the difference between a
-deliberate boundary and an unfinished promise.
+This document describes Relay 0.2 as a two-milestone release. **RLY-0.2-M-001**
+provides alert routing and on-call foundations. **RLY-0.2-M-002** adds escalation
+policy definitions, policy snapshots and the initial durable-delivery schema.
+M-002 remains in progress: provider delivery execution, restart-safe worker
+processing, and the operational UI/qualification are not yet complete. Relay
+0.2 must not be described as functionally complete until those gates pass.
 
 ## Release purpose
 
@@ -26,7 +27,9 @@ Current Responder      (rotation, or an active override)
       ↓
 Routing Record         (immutable audit trail, one per alert)
       ↓
-Notification           (Discord — the first notification channel)
+Durable multi-channel page (Discord, Slack, responder email — M-002 target)
+      ↓
+No acknowledgement? → Escalation policy (durable, execution-time schedule lookup)
       ↓
 Acknowledgement        (authorized responder, first one wins)
       ↓
@@ -239,28 +242,31 @@ never an authorization boundary.
   PostgreSQL;
 - all 0.1 tests still pass unchanged.
 
-## Deferred within Relay 0.2
+## Milestone RLY-0.2-M-002 — in progress
 
-Not implemented by M-001, and deliberately so:
+The repository now contains first-class organization-scoped policy/step storage,
+REST policy CRUD, rule channel/policy configuration, deterministic validation
+and due-time calculation, policy/schedule snapshot materialization, and the
+additive `003_escalation_delivery.sql` schema for escalation jobs, delivery
+outbox rows and attempt audit. These are foundations, not a claim that the M-002
+acceptance criteria have passed. Durable enqueue-and-dispatch, worker leasing
+and recovery, Slack/SMTP adapters, delivery APIs, acknowledgement-driven job
+cancellation, and alert/escalation operational surfaces still require
+implementation and PostgreSQL/production/browser qualification.
 
-- **additional notification channels** — email, SMS/phone paging, push,
-  Slack, Microsoft Teams, webhooks-as-a-target. Discord is the only channel;
-  the adapter boundary is where the next one lands;
-- **escalation policies** — no "if unacknowledged for N minutes, page the next
-  person". Relay 0.2 pages one responder and records the outcome;
-- **multiple rotation types** — only fixed-duration rotations. No weekly
-  "follow-the-sun" layering, no per-participant weights, no fractional
-  participation, no self-service shift swaps;
-- **calendar integration** — no Google Calendar/iCal import or export;
-- **rule targets other than schedules** — `targetKind` is an enum with exactly
-  one member today;
-- **alert correlation, deduplication beyond `externalId`, flapping detection,
-  grouping or silencing/maintenance windows**;
-- **notification retry/backoff queues** — one attempt per routing, with the
-  failure recorded and an explicit human `route` + `renotify` to retry;
-- **per-alert audit of every read**, granular RBAC beyond the four 0.1 roles,
-  SSO/SAML/SCIM;
-- **Relay Cloud, billing, multi-region replication, Kubernetes operator**.
+## Beyond Relay 0.2
+The following are deliberately future work, not Relay 0.2 release blockers and
+must not be implemented as part of M-002:
+
+- SMS paging, phone-call paging and native push notifications;
+- a native mobile application;
+- complex follow-the-sun/layered schedules, weighted/fractional rotations and
+  self-service shift swaps;
+- Google Calendar synchronization and calendar import;
+- advanced alert correlation, ML grouping and flapping detection;
+- sophisticated silencing/maintenance windows;
+- SSO/SAML/SCIM and granular enterprise RBAC;
+- Relay Cloud, billing, multi-region operation and a Kubernetes operator.
 
 ## Explicitly not implemented (product-wide non-goals)
 

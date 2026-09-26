@@ -31,6 +31,8 @@ const requiredPaths = [
   '/organizations/{organizationId}/oncall/overrides/{overrideId}',
   '/organizations/{organizationId}/routing-rules',
   '/organizations/{organizationId}/routing-rules/{ruleId}',
+  '/organizations/{organizationId}/escalation-policies',
+  '/organizations/{organizationId}/escalation-policies/{policyId}',
   '/organizations/{organizationId}/alerts',
   '/organizations/{organizationId}/alerts/{alertId}',
   '/organizations/{organizationId}/alerts/{alertId}/routing',
@@ -42,7 +44,7 @@ const requiredPaths = [
   '/organizations/{organizationId}/discord-identities/{userId}'
 ];
 
-const requiredSchemas = ['AlertIntake', 'AlertRouting', 'ScheduleInput', 'OverrideInput', 'RoutingRuleInput'];
+const requiredSchemas = ['AlertIntake', 'AlertRouting', 'ScheduleInput', 'OverrideInput', 'RoutingRuleInput', 'EscalationPolicyInput'];
 
 /** Routes the shipped SPA must handle for the Relay 0.2 surfaces. */
 const requiredUiRoutes = ['/app/alerts', '/app/oncall', '/app/teams', '/app/routing'];

@@ -11,6 +11,7 @@
 import { domainError } from '../../../packages/shared/domain.mjs';
 import { resolveOnCall, selectRoutingRule, upcomingHandoffs } from '../../../packages/shared/oncall.mjs';
 import { sendDiscordAlertNotification } from './discord.mjs';
+import { materializeEscalationPlan } from '../../../packages/shared/escalation.mjs';
 
 /**
  * Pure-ish rule evaluation: reads the organization's rules and the target
@@ -100,6 +101,27 @@ export async function routeAlert({ store, config, organizationId, alert, at = ne
   }
 
   const routing = await store.recordAlertRouting(organizationId, alert.id, decision);
+
+  // Materialize future work only after the durable alert/routing record exists.
+  // The persisted plan snapshots policy and schedule names so later edits do
+  // not alter the meaning of an already-routed alert.
+  if (decision.resolution === 'ROUTED' && decision.ruleId && store.materializeEscalationJobs) {
+    try {
+      const rule = await store.getRoutingRule(organizationId, decision.ruleId);
+      const policy = rule?.escalationPolicyId ? await store.getEscalationPolicy(organizationId, rule.escalationPolicyId) : null;
+      if (policy?.enabled) {
+        const schedulesById = {};
+        for (const step of policy.steps ?? []) {
+          if (!schedulesById[step.targetScheduleId]) schedulesById[step.targetScheduleId] = await store.getSchedule(organizationId, step.targetScheduleId);
+        }
+        const plan = materializeEscalationPlan({ organizationId, alertId: alert.id, routingId: routing.id, routedAt: at, policy, steps: policy.steps ?? [], schedulesById });
+        await store.materializeEscalationJobs(plan);
+      }
+    } catch (error) {
+      logger.error?.('Escalation plan persistence failed:', error.message);
+      warnings.push({ code: 'ESCALATION_PLAN_FAILED', message: 'The alert remains stored, but its escalation plan could not be persisted.' });
+    }
+  }
 
   if (notify) {
     const delivery = await deliverAlertNotification({ store, config, organizationId, alert, decision, fetchImpl, logger });

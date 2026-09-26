@@ -160,7 +160,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
       const orgBase=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)$/);
       if(req.method==='GET'&&orgBase){const user=requireUser(session);await requireOrgRole({store,userId:user.id,organizationId:orgBase[1],allowed:readableRoles});const org=await store.getOrganization(orgBase[1]);if(!org)throw domainError('ORGANIZATION_NOT_FOUND','Organization not found.',404);return sendJson(res,200,{data:org});}
 
-      const collection=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/(services|components|status-pages|incidents|alerts|integrations|teams|routing-rules|members)$/);
+      const collection=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/(services|components|status-pages|incidents|alerts|integrations|teams|routing-rules|escalation-policies|members)$/);
       if(collection){
         const user=requireUser(session);const organizationId=collection[1],resource=collection[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
         if(req.method==='GET'){
@@ -172,6 +172,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           if(resource==='members')return sendJson(res,200,{data:(await store.listMemberships(organizationId)).map((m)=>({userId:m.userId,role:m.role,createdAt:m.createdAt,displayName:m.user?.displayName??null,email:m.user?.email??null}))});
           if(resource==='teams')return sendJson(res,200,{data:await store.listTeams(organizationId)});
           if(resource==='routing-rules')return sendJson(res,200,{data:await store.listRoutingRules(organizationId)});
+          if(resource==='escalation-policies')return sendJson(res,200,{data:await store.listEscalationPolicies(organizationId)});
           if(resource==='integrations')return sendJson(res,200,{data:await store.listIntegrations(organizationId)});
         }
         if(req.method==='POST'){
@@ -184,7 +185,8 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
             const warning=await notifyDiscord(organizationId,'created',incident);hub.publish(organizationId,{type:'incident.created',incidentId:incident.id});return sendJson(res,201,{data:incident,...(warning?{warnings:[warning]}:{})});
           }
           if(resource==='teams'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=teamInput(await readJson(req));if(!input.slug)throw domainError('VALIDATION_ERROR','Responder team slug is invalid.',400);return sendJson(res,201,{data:await store.createTeam(organizationId,input)});}
-          if(resource==='routing-rules'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=routingRuleInput(await readJson(req));if(!await store.getSchedule(organizationId,input.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);if(input.matchServiceId&&!await store.getService(organizationId,input.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);return sendJson(res,201,{data:await store.createRoutingRule(organizationId,input)});}
+          if(resource==='routing-rules'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=routingRuleInput(await readJson(req));if(!await store.getSchedule(organizationId,input.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);if(input.matchServiceId&&!await store.getService(organizationId,input.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);if(input.escalationPolicyId&&!await store.getEscalationPolicy(organizationId,input.escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);return sendJson(res,201,{data:await store.createRoutingRule(organizationId,input)});}
+          if(resource==='escalation-policies'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const body=object(await readJson(req));const name=string(body.name,'name',{min:2,max:120});const description=string(body.description??'','description',{min:0,max:2000,optional:true})??'';const steps=Array.isArray(body.steps)?body.steps.map((step)=>({position:step.position,afterMinutes:step.afterMinutes,targetScheduleId:id(step.targetScheduleId,'targetScheduleId'),channels:step.channels})):[];for(const step of steps)if(!await store.getSchedule(organizationId,step.targetScheduleId))throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);return sendJson(res,201,{data:await store.saveEscalationPolicy(organizationId,{name,description,enabled:body.enabled!==false,steps})});}
         }
       }
 
@@ -365,8 +367,19 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const patch=routingRulePatch(await readJson(req));
           if(patch.targetScheduleId&&!await store.getSchedule(organizationId,patch.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);
           if('matchServiceId' in patch&&patch.matchServiceId&&!await store.getService(organizationId,patch.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);
+          if(patch.escalationPolicyId&&!await store.getEscalationPolicy(organizationId,patch.escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
           const updated=await store.updateRoutingRule(organizationId,ruleId,patch);if(!updated)throw domainError('RULE_NOT_FOUND','Routing rule not found.',404);
           hub.publish(organizationId,{type:'routing.rulesChanged'});return sendJson(res,200,{data:updated});
+        }
+      }
+
+      const escalationPolicyItem=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/escalation-policies\/([a-zA-Z0-9_-]+)$/);
+      if(escalationPolicyItem){
+        const user=requireUser(session),organizationId=escalationPolicyItem[1],policyId=escalationPolicyItem[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        if(req.method==='GET'){const policy=await store.getEscalationPolicy(organizationId,policyId);if(!policy)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendJson(res,200,{data:policy});}
+        if(req.method==='DELETE'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const deleted=await store.deleteEscalationPolicy(organizationId,policyId);if(!deleted)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendNoContent(res,204);}
+        if(req.method==='PUT'||req.method==='PATCH'){
+          await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const body=object(await readJson(req));const name=string(body.name,'name',{min:2,max:120});const description=string(body.description??'','description',{min:0,max:2000,optional:true})??'';const steps=Array.isArray(body.steps)?body.steps.map((step)=>({position:step.position,afterMinutes:step.afterMinutes,targetScheduleId:id(step.targetScheduleId,'targetScheduleId'),channels:step.channels})):[];for(const step of steps)if(!await store.getSchedule(organizationId,step.targetScheduleId))throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);const saved=await store.saveEscalationPolicy(organizationId,{name,description,enabled:body.enabled!==false,steps},policyId);if(!saved)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendJson(res,200,{data:saved});
         }
       }
 

@@ -272,6 +272,8 @@ export function overrideInput(body) {
 
 export function routingRuleInput(body) {
   body = object(body);
+  const channels = body.notificationChannels ?? ['DISCORD'];
+  if (!Array.isArray(channels) || !channels.length || channels.some((channel) => !['DISCORD', 'SLACK', 'EMAIL'].includes(channel)) || new Set(channels).size !== channels.length) throw domainError('VALIDATION_ERROR', 'notificationChannels must contain unique supported channels.', 400);
   return {
     name: string(body.name, 'name', { min: 2, max: 160 }),
     enabled: booleanValue(body.enabled, 'enabled', { fallback: true }),
@@ -280,7 +282,9 @@ export function routingRuleInput(body) {
     matchSource: body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null,
     matchSeverities: severityTokens(body.matchSeverities),
     targetKind: enumValue(body.targetKind ?? 'ONCALL_SCHEDULE', 'targetKind', ['ONCALL_SCHEDULE']),
-    targetScheduleId: id(body.targetScheduleId, 'targetScheduleId')
+    targetScheduleId: id(body.targetScheduleId, 'targetScheduleId'),
+    notificationChannels: [...channels],
+    escalationPolicyId: body.escalationPolicyId ? id(body.escalationPolicyId, 'escalationPolicyId') : null
   };
 }
 
@@ -294,5 +298,11 @@ export function routingRulePatch(body) {
   if ('matchSource' in body) out.matchSource = body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null;
   if ('matchSeverities' in body) out.matchSeverities = severityTokens(body.matchSeverities);
   if ('targetScheduleId' in body) out.targetScheduleId = id(body.targetScheduleId, 'targetScheduleId');
+  if ('notificationChannels' in body) {
+    const channels = body.notificationChannels;
+    if (!Array.isArray(channels) || !channels.length || channels.some((channel) => !['DISCORD', 'SLACK', 'EMAIL'].includes(channel)) || new Set(channels).size !== channels.length) throw domainError('VALIDATION_ERROR', 'notificationChannels must contain unique supported channels.', 400);
+    out.notificationChannels = [...channels];
+  }
+  if ('escalationPolicyId' in body) out.escalationPolicyId = body.escalationPolicyId ? id(body.escalationPolicyId, 'escalationPolicyId') : null;
   return out;
 }

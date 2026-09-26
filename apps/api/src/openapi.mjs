@@ -123,8 +123,18 @@ export const openapi = {
     },
     '/organizations/{organizationId}/routing-rules/{ruleId}': {
       get: { summary: 'Routing rule detail' },
-      patch: { summary: 'Update a rule, its enabled state, priority, conditions or target schedule (OWNER/ADMIN)' },
+      patch: { summary: 'Update a rule, its enabled state, priority, conditions, notification channels or escalation policy (OWNER/ADMIN)' },
       delete: { summary: 'Delete a routing rule (OWNER/ADMIN)', responses: { '204': { description: 'Deleted' } } }
+    },
+    '/organizations/{organizationId}/escalation-policies': {
+      get: { summary: 'List escalation policies and ordered steps' },
+      post: { summary: 'Create an organization-scoped escalation policy with ordered steps (OWNER/ADMIN)', requestBody: json(ref('EscalationPolicyInput')), responses: { '201': { description: 'Created policy' } } }
+    },
+    '/organizations/{organizationId}/escalation-policies/{policyId}': {
+      get: { summary: 'Read escalation policy and steps' },
+      put: { summary: 'Replace policy definition and steps (OWNER/ADMIN); existing alert plans are immutable snapshots' },
+      patch: { summary: 'Replace policy definition and steps (OWNER/ADMIN)' },
+      delete: { summary: 'Delete policy for future routing; existing materialized jobs remain independent', responses: { '204': { description: 'Deleted' } } }
     },
 
     // ---- Relay 0.2: alerts and routing results ----
@@ -201,6 +211,10 @@ export const openapi = {
       alertKey: { type: 'apiKey', in: 'header', name: 'x-relay-alert-key' }
     },
     schemas: {
+      EscalationPolicyInput: {
+        type: 'object', required: ['name','steps'],
+        properties: { name: { type: 'string', minLength: 2, maxLength: 120 }, description: { type: 'string', maxLength: 2000 }, enabled: { type: 'boolean' }, steps: { type: 'array', maxItems: 32, items: { type: 'object', required: ['position','afterMinutes','targetScheduleId','channels'], properties: { position: { type: 'integer', minimum: 0 }, afterMinutes: { type: 'integer', minimum: 1, description: 'Offset from initial routing time, not the previous step.' }, targetScheduleId: { type: 'string' }, channels: { type: 'array', minItems: 1, items: { type: 'string', enum: ['DISCORD','SLACK','EMAIL'] } } } } } }
+      },
       AlertIntake: {
         type: 'object',
         required: ['organizationSlug', 'source', 'title', 'severity'],
@@ -292,7 +306,9 @@ export const openapi = {
           matchSource: { type: ['string', 'null'], description: 'Exact match after trimming and case-folding. Null matches any source.' },
           matchSeverities: { type: 'array', items: { type: 'string' }, description: 'Empty array matches any severity.' },
           targetKind: { type: 'string', enum: ['ONCALL_SCHEDULE'], default: 'ONCALL_SCHEDULE' },
-          targetScheduleId: { type: 'string' }
+          targetScheduleId: { type: 'string' },
+          notificationChannels: { type: 'array', items: { type: 'string', enum: ['DISCORD','SLACK','EMAIL'] }, default: ['DISCORD'] },
+          escalationPolicyId: { type: ['string','null'], description: 'Optional organization-scoped escalation policy.' }
         }
       }
     }

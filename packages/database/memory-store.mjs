@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { domainError } from '../shared/domain.mjs';
+import { validateEscalationSteps } from '../shared/escalation.mjs';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -25,6 +26,9 @@ export class MemoryStore {
     this.postmortems = [];
     this.alerts = [];
     this.integrations = [];
+    this.escalationPolicies = [];
+    this.escalationPolicySteps = [];
+    this.escalationJobs = [];
     this.teams = [];
     this.teamMembers = [];
     this.schedules = [];
@@ -318,7 +322,9 @@ export class MemoryStore {
     const routing = this.alertRoutings.find((r) => r.organizationId === organizationId && r.alertId === alertId);
     if (!routing) return undefined;
     if (routing.acknowledgedAt) return { routing: this.#routingRecord(routing), alreadyAcknowledged: true };
-    Object.assign(routing, { acknowledgedAt: now(), acknowledgedByUserId: userId, acknowledgedByDisplayName: displayName ?? null, updatedAt: now() });
+    const acknowledgedAt=now();
+    Object.assign(routing, { acknowledgedAt, acknowledgedByUserId: userId, acknowledgedByDisplayName: displayName ?? null, updatedAt: acknowledgedAt });
+    this.escalationJobs=this.escalationJobs.map((job)=>job.organizationId===organizationId&&job.alertId===alertId&&['PENDING','IN_FLIGHT'].includes(job.state)?{...job,state:'CANCELLED_ACKNOWLEDGED',updatedAt:acknowledgedAt}:job);
     return { routing: this.#routingRecord(routing), alreadyAcknowledged: false };
   }
   async linkRoutingIncident(organizationId, alertId, incidentId) {
@@ -488,12 +494,13 @@ export class MemoryStore {
     const schedule = this.schedules.find((s) => s.organizationId === organizationId && s.id === input.targetScheduleId);
     if (!schedule) throw domainError('INVALID_REFERENCE', 'The routing target schedule must belong to the same organization.', 400);
     if (input.matchServiceId && !this.services.some((s) => s.organizationId === organizationId && s.id === input.matchServiceId)) throw domainError('INVALID_REFERENCE', 'The matched service must belong to the same organization.', 400);
+    if (input.escalationPolicyId && !this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.id===input.escalationPolicyId)) throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
     const at = now();
     const rule = {
       id: uid(), organizationId, name: input.name, enabled: input.enabled !== false, priority: input.priority,
       matchServiceId: input.matchServiceId ?? null, matchSource: input.matchSource ?? null,
       matchSeverities: input.matchSeverities ?? [], targetKind: input.targetKind ?? 'ONCALL_SCHEDULE',
-      targetScheduleId: schedule.id, createdAt: at, updatedAt: at
+      targetScheduleId: schedule.id, notificationChannels: input.notificationChannels??['DISCORD'], escalationPolicyId: input.escalationPolicyId??null, createdAt: at, updatedAt: at
     };
     this.routingRules.push(rule);
     return this.#ruleView(rule);
@@ -515,11 +522,14 @@ export class MemoryStore {
     if (!this.schedules.some((s) => s.organizationId === organizationId && s.id === targetScheduleId)) throw domainError('INVALID_REFERENCE', 'The routing target schedule must belong to the same organization.', 400);
     const matchServiceId = 'matchServiceId' in patch ? (patch.matchServiceId ?? null) : rule.matchServiceId;
     if (matchServiceId && !this.services.some((s) => s.organizationId === organizationId && s.id === matchServiceId)) throw domainError('INVALID_REFERENCE', 'The matched service must belong to the same organization.', 400);
+    const escalationPolicyId='escalationPolicyId' in patch?(patch.escalationPolicyId??null):rule.escalationPolicyId;
+    if(escalationPolicyId&&!this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.id===escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
     Object.assign(rule, {
       name: patch.name ?? rule.name, enabled: patch.enabled === undefined ? rule.enabled : patch.enabled,
       priority: patch.priority ?? rule.priority, matchServiceId,
       matchSource: 'matchSource' in patch ? (patch.matchSource ?? null) : rule.matchSource,
-      matchSeverities: patch.matchSeverities ?? rule.matchSeverities, targetScheduleId, updatedAt: now()
+      matchSeverities: patch.matchSeverities ?? rule.matchSeverities, targetScheduleId,
+      notificationChannels:patch.notificationChannels??rule.notificationChannels??['DISCORD'], escalationPolicyId, updatedAt: now()
     });
     return this.#ruleView(rule);
   }
@@ -528,6 +538,34 @@ export class MemoryStore {
     this.routingRules = this.routingRules.filter((r) => !(r.organizationId === organizationId && r.id === ruleId));
     return this.routingRules.length < before;
   }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — organization-scoped escalation policies
+  // ---------------------------------------------------------------------
+  async listEscalationPolicies(organizationId) {
+    return this.escalationPolicies.filter((p)=>p.organizationId===organizationId).map((p)=>({...clone(p),steps:this.escalationPolicySteps.filter((s)=>s.policyId===p.id).sort((a,b)=>a.position-b.position).map(clone)}));
+  }
+  async getEscalationPolicy(organizationId,policyId) { return (await this.listEscalationPolicies(organizationId)).find((p)=>p.id===policyId); }
+  async saveEscalationPolicy(organizationId,input,policyId) {
+    const steps=validateEscalationSteps(input.steps??[]);
+    for(const step of steps) if(!this.schedules.some((s)=>s.organizationId===organizationId&&s.id===step.targetScheduleId)) throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);
+    let policy=policyId?this.escalationPolicies.find((p)=>p.organizationId===organizationId&&p.id===policyId):undefined;
+    if(policyId&&!policy)return undefined;
+    if(this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.name===input.name&&p.id!==policy?.id))throw domainError('CONFLICT','Escalation policy name already exists.',409);
+    if(policy)Object.assign(policy,{name:input.name,description:input.description??'',enabled:input.enabled!==false,updatedAt:now()});
+    else {policy={id:uid(),organizationId,name:input.name,description:input.description??'',enabled:input.enabled!==false,createdAt:now(),updatedAt:now()};this.escalationPolicies.push(policy);}
+    this.escalationPolicySteps=this.escalationPolicySteps.filter((s)=>s.policyId!==policy.id);
+    this.escalationPolicySteps.push(...steps.map((step)=>({...clone(step),id:uid(),organizationId,policyId:policy.id,createdAt:now()})));
+    return this.getEscalationPolicy(organizationId,policy.id);
+  }
+  async deleteEscalationPolicy(organizationId,policyId) {
+    const count=this.escalationPolicies.length;this.escalationPolicies=this.escalationPolicies.filter((p)=>!(p.organizationId===organizationId&&p.id===policyId));
+    if(this.escalationPolicies.length===count)return false;this.escalationPolicySteps=this.escalationPolicySteps.filter((s)=>s.policyId!==policyId);for(const rule of this.routingRules)if(rule.organizationId===organizationId&&rule.escalationPolicyId===policyId)rule.escalationPolicyId=null;return true;
+  }
+  async materializeEscalationJobs(plan) {
+    const inserted=[];for(const item of plan){if(this.escalationJobs.some((j)=>j.routingId===item.routingId&&j.stepPosition===item.stepPosition))continue;const job={id:uid(),...clone(item),createdAt:now(),updatedAt:now()};this.escalationJobs.push(job);inserted.push(clone(job));}return inserted;
+  }
+  async listEscalationJobs(organizationId,alertId) {return this.escalationJobs.filter((j)=>j.organizationId===organizationId&&j.alertId===alertId).sort((a,b)=>a.stepPosition-b.stepPosition).map(clone);}
 
   // ---------------------------------------------------------------------
   // Relay 0.2 — optional Discord responder mapping

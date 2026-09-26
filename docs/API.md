@@ -413,3 +413,19 @@ Returns `text/event-stream`. Mutation events contain a small refresh envelope, n
 
 Relay 0.2 adds `alert.routed` (`alertId`, `resolution`) and
 `alert.acknowledged` (`alertId`) to the existing incident events.
+
+## Escalation policies (M-002 partial)
+
+- `GET /api/v1/organizations/{organizationId}/escalation-policies`
+- `POST /api/v1/organizations/{organizationId}/escalation-policies`
+- `GET|PUT|PATCH|DELETE /api/v1/organizations/{organizationId}/escalation-policies/{policyId}`
+
+Policy create/replace bodies contain `name`, optional `description`/`enabled`, and
+`steps`: ordered objects with `position`, positive `afterMinutes`,
+`targetScheduleId`, and `channels` (`DISCORD`, `SLACK`, `EMAIL`). Delays are
+measured from initial routing time. Routing-rule inputs accept
+`notificationChannels` (default `['DISCORD']`) and optional `escalationPolicyId`.
+The service validates organization ownership. Existing alert jobs snapshot policy
+and schedule names. The M-002 schema reserves delivery/attempt API data, but
+those delivery operations and a restart-safe dispatcher are not yet implemented.
+See [ESCALATION.md](ESCALATION.md) for the current qualification boundary.

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { domainError } from '../shared/domain.mjs';
+import { validateEscalationSteps } from '../shared/escalation.mjs';
 import { isMigrationFileName, sortMigrationNames, splitSqlStatements, stripTransactionWrapper } from './sql.mjs';
 
 const MIGRATIONS_URL = new URL('./migrations/', import.meta.url);
@@ -380,6 +381,7 @@ export class PostgresStore {
       const routing=await this.#one(`UPDATE alert_routings SET acknowledged_at=now(),acknowledged_by_user_id=$3,
         acknowledged_by_display_name=$4,updated_at=now() WHERE organization_id=$1 AND alert_id=$2 RETURNING *`,
         [organizationId,alertId,userId,displayName??null],tx);
+      await tx.unsafe(`UPDATE escalation_jobs SET state='CANCELLED_ACKNOWLEDGED',updated_at=now() WHERE organization_id=$1 AND alert_id=$2 AND state IN ('PENDING','IN_FLIGHT')`,[organizationId,alertId]);
       return{routing,alreadyAcknowledged:false};
     });
   }
@@ -550,10 +552,10 @@ export class PostgresStore {
   // ---------------------------------------------------------------------
   async createRoutingRule(organizationId,input){
     try{
-      const rule=await this.#one(`INSERT INTO alert_routing_rules(id,organization_id,name,enabled,priority,match_service_id,match_source,match_severities,target_kind,target_schedule_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *`,
+      const rule=await this.#one(`INSERT INTO alert_routing_rules(id,organization_id,name,enabled,priority,match_service_id,match_source,match_severities,target_kind,target_schedule_id,notification_channels,escalation_policy_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9,$10,$11::text::jsonb,$12) RETURNING *`,
         [uid(),organizationId,input.name,input.enabled!==false,input.priority,input.matchServiceId??null,input.matchSource??null,
-         JSON.stringify(input.matchSeverities??[]),input.targetKind??'ONCALL_SCHEDULE',input.targetScheduleId]);
+         JSON.stringify(input.matchSeverities??[]),input.targetKind??'ONCALL_SCHEDULE',input.targetScheduleId,JSON.stringify(input.notificationChannels??['DISCORD']),input.escalationPolicyId??null]);
       return{...rule,scheduleName:(await this.#one(`SELECT name FROM oncall_schedules WHERE organization_id=$1 AND id=$2`,[organizationId,rule.targetScheduleId]))?.name??null};
     }catch(error){throw normalizeDbError(error)}
   }
@@ -574,11 +576,13 @@ export class PostgresStore {
     if(!current)return undefined;
     try{
       const rule=await this.#one(`UPDATE alert_routing_rules SET name=$3,enabled=$4,priority=$5,match_service_id=$6,match_source=$7,
-        match_severities=$8::text::jsonb,target_schedule_id=$9,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,
+        match_severities=$8::text::jsonb,target_schedule_id=$9,notification_channels=$10::text::jsonb,escalation_policy_id=$11,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,
         [organizationId,ruleId,patch.name??current.name,patch.enabled===undefined?current.enabled:patch.enabled,
          patch.priority??current.priority,'matchServiceId' in patch?(patch.matchServiceId??null):current.matchServiceId,
          'matchSource' in patch?(patch.matchSource??null):current.matchSource,
-         JSON.stringify(patch.matchSeverities??current.matchSeverities??[]),patch.targetScheduleId??current.targetScheduleId]);
+         JSON.stringify(patch.matchSeverities??current.matchSeverities??[]),patch.targetScheduleId??current.targetScheduleId,
+         JSON.stringify(patch.notificationChannels??current.notificationChannels??['DISCORD']),
+         'escalationPolicyId' in patch?(patch.escalationPolicyId??null):current.escalationPolicyId]);
       return{...rule,scheduleName:(await this.#one(`SELECT name FROM oncall_schedules WHERE organization_id=$1 AND id=$2`,[organizationId,rule.targetScheduleId]))?.name??null};
     }catch(error){throw normalizeDbError(error)}
   }
@@ -586,6 +590,38 @@ export class PostgresStore {
     const rows=await this.sql.unsafe(`DELETE FROM alert_routing_rules WHERE organization_id=$1 AND id=$2 RETURNING id`,[organizationId,ruleId]);
     return rows.length>0;
   }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — organization-scoped escalation policies
+  // ---------------------------------------------------------------------
+  async listEscalationPolicies(organizationId){
+    const policies=await this.#many(`SELECT * FROM escalation_policies WHERE organization_id=$1 ORDER BY name,id`,[organizationId]);
+    for(const policy of policies) policy.steps=await this.#many(`SELECT * FROM escalation_policy_steps WHERE organization_id=$1 AND policy_id=$2 ORDER BY position`,[organizationId,policy.id]);
+    return policies;
+  }
+  async getEscalationPolicy(organizationId,policyId){return (await this.listEscalationPolicies(organizationId)).find((p)=>p.id===policyId);}
+  async saveEscalationPolicy(organizationId,input,policyId){
+    const steps=validateEscalationSteps(input.steps??[]);
+    try{return await this.sql.begin(async(tx)=>{
+      let policy;
+      if(policyId){
+        policy=await this.#one(`UPDATE escalation_policies SET name=$3,description=$4,enabled=$5,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,[organizationId,policyId,input.name,input.description??'',input.enabled!==false],tx);
+        if(!policy)return undefined;
+        await tx.unsafe(`DELETE FROM escalation_policy_steps WHERE organization_id=$1 AND policy_id=$2`,[organizationId,policyId]);
+      }else policy=await this.#one(`INSERT INTO escalation_policies(id,organization_id,name,description,enabled) VALUES($1,$2,$3,$4,$5) RETURNING *`,[uid(),organizationId,input.name,input.description??'',input.enabled!==false],tx);
+      for(const step of steps) await tx.unsafe(`INSERT INTO escalation_policy_steps(id,organization_id,policy_id,position,after_minutes,target_schedule_id,channels) VALUES($1,$2,$3,$4,$5,$6,$7::text::jsonb)`,[uid(),organizationId,policy.id,step.position,step.afterMinutes,step.targetScheduleId,JSON.stringify(step.channels)]);
+      return {...policy,steps:await this.#many(`SELECT * FROM escalation_policy_steps WHERE organization_id=$1 AND policy_id=$2 ORDER BY position`,[organizationId,policy.id],tx)};
+    })}catch(error){throw normalizeDbError(error)}
+  }
+  async deleteEscalationPolicy(organizationId,policyId){const rows=await this.sql.unsafe(`DELETE FROM escalation_policies WHERE organization_id=$1 AND id=$2 RETURNING id`,[organizationId,policyId]);return rows.length>0;}
+  async materializeEscalationJobs(plan){
+    return this.sql.begin(async(tx)=>{
+      const result=[];
+      for(const job of plan){const row=await this.#one(`INSERT INTO escalation_jobs(id,organization_id,alert_id,routing_id,policy_id,policy_name_snapshot,step_position,after_minutes,due_at,target_schedule_id,target_schedule_name_snapshot,channels,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::jsonb,'PENDING') ON CONFLICT(routing_id,step_position) DO NOTHING RETURNING *`,[uid(),job.organizationId,job.alertId,job.routingId,job.policyId,job.policyNameSnapshot,job.stepPosition,job.afterMinutes,job.dueAt,job.targetScheduleId,job.targetScheduleNameSnapshot,JSON.stringify(job.channels)],tx);if(row)result.push(row);}
+      return result;
+    });
+  }
+  async listEscalationJobs(organizationId,alertId){return this.#many(`SELECT * FROM escalation_jobs WHERE organization_id=$1 AND alert_id=$2 ORDER BY step_position`,[organizationId,alertId]);}
 
   // ---------------------------------------------------------------------
   // Relay 0.2 — Discord responder mapping
