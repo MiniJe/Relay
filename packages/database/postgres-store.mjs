@@ -804,10 +804,15 @@ export class PostgresStore {
    */
   async completeEscalationJob({organizationId,jobId,leaseOwner,state,responderUserId=null,responderNameSnapshot=null,result={},deliveries=[]}){
     return this.sql.begin(async(tx)=>{
+      // Lock routing FIRST, then the escalation job. Acknowledgement takes the
+      // same routing→job order, so the two paths cannot deadlock by holding one
+      // row each while waiting for the other.
+      const jobRef=await this.#one(`SELECT routing_id FROM escalation_jobs WHERE organization_id=$1 AND id=$2`,[organizationId,jobId],tx);
+      if(!jobRef)return undefined;
+      const routing=await this.#one(`SELECT * FROM alert_routings WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,jobRef.routingId],tx);
       const job=await this.#one(`SELECT * FROM escalation_jobs WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,jobId],tx);
       if(!job)return undefined;
       if(job.leaseOwner!==leaseOwner)return{staleLease:true,job};
-      const routing=await this.#one(`SELECT * FROM alert_routings WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,job.routingId],tx);
       if(routing?.acknowledgedAt&&state!=='CANCELLED_ACKNOWLEDGED'&&state!=='FAILED'){
         state='CANCELLED_ACKNOWLEDGED';
         result={...result,reason:'ACKNOWLEDGED',acknowledgedAt:routing.acknowledgedAt};
