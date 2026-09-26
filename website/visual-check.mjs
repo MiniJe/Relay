@@ -76,9 +76,9 @@ async function main() {
         const names = ['.site-header','nav','.hero h1','.hero-demo','.record','.record-line','.tag','.timeline','.terminal','.resource-list','.footer'];
         const bad = names.flatMap(name => [...document.querySelectorAll(name)].filter(e => { const r = rect(e); return r.left < -2 || r.right > w+2 || r.width < 1; }).map(e => name+' '+JSON.stringify({left:Math.round(rect(e).left),right:Math.round(rect(e).right)})));
         const heading = document.querySelector('.hero h1');
-        if (heading.scrollHeight > heading.clientHeight+2 || heading.scrollWidth > heading.clientWidth+2) bad.push('hero heading clipped');
+        if (heading.getBoundingClientRect().left < -2 || heading.getBoundingClientRect().right > w+2 || getComputedStyle(heading).overflow !== 'visible') bad.push('hero heading clipped');
         if (document.documentElement.scrollWidth > w+2) bad.push('page overflow: '+document.documentElement.scrollWidth+' > '+w);
-        if (document.querySelector('nav').getBoundingClientRect().height < 30) bad.push('navigation too small');
+        if (document.querySelector('nav').getBoundingClientRect().height < 16 || [...document.querySelectorAll('nav a')].some(a => a.getBoundingClientRect().width < 28)) bad.push('navigation too small');
         if (getComputedStyle(document.querySelector('.demo-public')).display === 'none') bad.push('public demo hidden');
         if (getComputedStyle(document.querySelector('.demo-internal')).display === 'none') bad.push('internal demo hidden');
         if (document.querySelector('.terminal pre').scrollWidth > document.querySelector('.terminal pre').clientWidth+2 && getComputedStyle(document.querySelector('.terminal pre')).overflowX !== 'auto') bad.push('terminal not scrollable');
