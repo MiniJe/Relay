@@ -110,8 +110,10 @@ jobs:
           set +e
           npm run verify:browser > /tmp/relay-browser-smoke.log 2>&1
           code=$?
-          grep -E '^FAIL' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' | head -10
-          tail -c 3200 /tmp/relay-browser-smoke.log | tr '\n' '~' | sed 's/^/::error::smoke-tail| /'
+          if [ "$code" -ne 0 ]; then
+            grep -E '^FAIL' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' | head -10
+            tail -c 3200 /tmp/relay-browser-smoke.log | tr '\n' '~' | sed 's/^/::error::smoke-tail| /'
+          fi
           exit $code
 
       - name: Production PostgreSQL-backed E2E
