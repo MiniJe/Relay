@@ -1,9 +1,9 @@
 # RLY-0.2-M-002 qualification evidence
 
-- Workflow run: https://github.com/MiniJe/Relay/actions/runs/36254234108
-- Commit under test: `6006c5b22d58241f9085661515cdfefb75be1b2e`
+- Workflow run: https://github.com/MiniJe/Relay/actions/runs/36254880425
+- Commit under test: `da65bd9e7bcfdbc45f14115d20ba45e98f908655`
 - Branch: `arena/01a0de58-relay`
-- Recorded at: 2026-09-26T16:07:30Z
+- Recorded at: 2026-09-26T16:17:59Z
 - Runner: `Linux` with Docker Compose, `postgres:16-alpine` and a real Google Chrome
 
 Every gate below ran against the real runtime (PostgreSQL, Docker Compose, Chrome);
@@ -80,163 +80,163 @@ TAP version 13
 # Subtest: principal API workflow persists timeline, separates public updates, delivers Discord, and enforces tenant isolation
 ok 1 - principal API workflow persists timeline, separates public updates, delivers Discord, and enforces tenant isolation
   ---
-  duration_ms: 241.388857
+  duration_ms: 121.947599
   type: 'test'
   ...
 # Subtest: resolved incidents cannot be silently reopened
 ok 2 - resolved incidents cannot be silently reopened
   ---
-  duration_ms: 61.336179
+  duration_ms: 35.153362
   type: 'test'
   ...
 # Subtest: Discord delivery failure is non-destructive and does not log webhook secrets
 ok 3 - Discord delivery failure is non-destructive and does not log webhook secrets
   ---
-  duration_ms: 61.814585
+  duration_ms: 40.268791
   type: 'test'
   ...
 # Subtest: server-side authorization allows only declared organization roles
 ok 4 - server-side authorization allows only declared organization roles
   ---
-  duration_ms: 1.50721
+  duration_ms: 0.744285
   type: 'test'
   ...
 # Subtest: representative OWNER/ADMIN/RESPONDER/VIEWER permissions and tenant-scoped commander references are enforced by API
 ok 5 - representative OWNER/ADMIN/RESPONDER/VIEWER permissions and tenant-scoped commander references are enforced by API
   ---
-  duration_ms: 288.244377
+  duration_ms: 181.86318
   type: 'test'
   ...
 # Subtest: incident lifecycle permits forward/coordination transitions and makes RESOLVED terminal
 ok 6 - incident lifecycle permits forward/coordination transitions and makes RESOLVED terminal
   ---
-  duration_ms: 1.180448
+  duration_ms: 0.672436
   type: 'test'
   ...
 # Subtest: severity validation rejects unknown values
 ok 7 - severity validation rejects unknown values
   ---
-  duration_ms: 0.294391
+  duration_ms: 0.142575
   type: 'test'
   ...
 # Subtest: public status aggregation derives incident impact without mutating component source state
 ok 8 - public status aggregation derives incident impact without mutating component source state
   ---
-  duration_ms: 0.365033
+  duration_ms: 0.191019
   type: 'test'
   ...
 # Subtest: routing persists one logical delivery per configured channel before any provider call
 ok 9 - routing persists one logical delivery per configured channel before any provider call
   ---
-  duration_ms: 538.601458
+  duration_ms: 158.557512
   type: 'test'
   ...
 # Subtest: a retryable failure retries at +1 minute and +5 minutes and then stops forever
 ok 10 - a retryable failure retries at +1 minute and +5 minutes and then stops forever
   ---
-  duration_ms: 159.759221
+  duration_ms: 102.854407
   type: 'test'
   ...
 # Subtest: a permanent provider failure stops immediately and never retries
 ok 11 - a permanent provider failure stops immediately and never retries
   ---
-  duration_ms: 136.102184
+  duration_ms: 87.471601
   type: 'test'
   ...
 # Subtest: manual retry keeps earlier attempts, records who asked, and is closed to VIEWER
 ok 12 - manual retry keeps earlier attempts, records who asked, and is closed to VIEWER
   ---
-  duration_ms: 147.508393
+  duration_ms: 96.323207
   type: 'test'
   ...
 # Subtest: acknowledgement cancels unsent pages and leaves sent pages and attempts intact
 ok 13 - acknowledgement cancels unsent pages and leaves sent pages and attempts intact
   ---
-  duration_ms: 142.437435
+  duration_ms: 90.785965
   type: 'test'
   ...
 # Subtest: Slack and email pages carry sanitized text and can never choose their own recipient
 ok 14 - Slack and email pages carry sanitized text and can never choose their own recipient
   ---
-  duration_ms: 139.557458
+  duration_ms: 88.934412
   type: 'test'
   ...
 # Subtest: unusable destinations fail permanently with an operator-readable reason
 ok 15 - unusable destinations fail permanently with an operator-readable reason
   ---
-  duration_ms: 137.728797
+  duration_ms: 88.659491
   type: 'test'
   ...
 # Subtest: E2E smoke: authenticate → service → component → incident → public page → resolve → postmortem
 ok 16 - E2E smoke: authenticate → service → component → incident → public page → resolve → postmortem
   ---
-  duration_ms: 123.56564
+  duration_ms: 71.857847
   type: 'test'
   ...
 # Subtest: escalation steps are deterministic, strictly ordered and reject duplicate positions or times
 ok 17 - escalation steps are deterministic, strictly ordered and reject duplicate positions or times
   ---
-  duration_ms: 1.746668
+  duration_ms: 0.959871
   type: 'test'
   ...
 # Subtest: plan due times are measured from original route and snapshot names
 ok 18 - plan due times are measured from original route and snapshot names
   ---
-  duration_ms: 0.498974
+  duration_ms: 0.361206
   type: 'test'
   ...
 # Subtest: acknowledgement cancels pending work without rewriting completed history
 ok 19 - acknowledgement cancels pending work without rewriting completed history
   ---
-  duration_ms: 0.30473
+  duration_ms: 0.146522
   type: 'test'
   ...
 # Subtest: retry policy is bounded and classifies transient provider failures
 ok 20 - retry policy is bounded and classifies transient provider failures
   ---
-  duration_ms: 0.228798
+  duration_ms: 0.108694
   type: 'test'
   ...
 # Subtest: policy edits and deletion do not rewrite an already materialized plan
 ok 21 - policy edits and deletion do not rewrite an already materialized plan
   ---
-  duration_ms: 1.536345
+  duration_ms: 0.778366
   type: 'test'
   ...
 # Subtest: unsupported configured channels fail closed instead of being misrouted to a real provider
 ok 22 - unsupported configured channels fail closed instead of being misrouted to a real provider
   ---
-  duration_ms: 0.324067
+  duration_ms: 0.180473
   type: 'test'
   ...
 # Subtest: a supported but unconfigured channel reports a skip rather than borrowing another transport
 ok 23 - a supported but unconfigured channel reports a skip rather than borrowing another transport
   ---
-  duration_ms: 0.363741
+  duration_ms: 0.177097
   type: 'test'
   ...
 # Subtest: provider text neutralizes mentions, controls and hostile Slack syntax
 ok 24 - provider text neutralizes mentions, controls and hostile Slack syntax
   ---
-  duration_ms: 0.368669
+  duration_ms: 0.242667
   type: 'test'
   ...
 # Subtest: migration ordering is derived from filenames, not readdir order
 ok 25 - migration ordering is derived from filenames, not readdir order
   ---
-  duration_ms: 1.390131
+  duration_ms: 0.763003
   type: 'test'
   ...
 # Subtest: migration runner discovers migration 003 after 001 and 002
 ok 26 - migration runner discovers migration 003 after 001 and 002
   ---
-  duration_ms: 7.256846
+  duration_ms: 3.774604
   type: 'test'
   ...
 # Subtest: SQL statement splitting survives comments, strings and dollar-quoted bodies
 ok 27 - SQL statement splitting survives comments, strings and dollar-quoted bodies
   ---
-  duration_ms: 0.348883
+  duration_ms: 0.237769
   type: 'test'
   ...
 # {
@@ -269,109 +269,109 @@ ok 27 - SQL statement splitting survives comments, strings and dollar-quoted bod
 # Subtest: upgrading a populated Relay 0.1 database applies 002→003 and preserves all 0.1 data
 ok 28 - upgrading a populated Relay 0.1 database applies 002→003 and preserves all 0.1 data
   ---
-  duration_ms: 538.008984
+  duration_ms: 521.12657
   type: 'test'
   ...
 # Subtest: timezone validation accepts IANA identifiers and rejects everything else
 ok 29 - timezone validation accepts IANA identifiers and rejects everything else
   ---
-  duration_ms: 16.932246
+  duration_ms: 10.017648
   type: 'test'
   ...
 # Subtest: timezone rendering is explicit and independent of the host timezone
 ok 30 - timezone rendering is explicit and independent of the host timezone
   ---
-  duration_ms: 2.098215
+  duration_ms: 1.232663
   type: 'test'
   ...
 # Subtest: rotation intervals are validated unambiguously in minutes
 ok 31 - rotation intervals are validated unambiguously in minutes
   ---
-  duration_ms: 0.310431
+  duration_ms: 0.191189
   type: 'test'
   ...
 # Subtest: rotation selection is deterministic at period boundaries
 ok 32 - rotation selection is deterministic at period boundaries
   ---
-  duration_ms: 0.398746
+  duration_ms: 0.203177
   type: 'test'
   ...
 # Subtest: rotation resolves correctly across many handoffs
 ok 33 - rotation resolves correctly across many handoffs
   ---
-  duration_ms: 0.708595
+  duration_ms: 0.399464
   type: 'test'
   ...
 # Subtest: rotation period boundaries are absolute UTC instants
 ok 34 - rotation period boundaries are absolute UTC instants
   ---
-  duration_ms: 0.170268
+  duration_ms: 0.076245
   type: 'test'
   ...
 # Subtest: a rotation that has not started yet resolves no responder
 ok 35 - a rotation that has not started yet resolves no responder
   ---
-  duration_ms: 0.156343
+  duration_ms: 0.058899
   type: 'test'
   ...
 # Subtest: an empty rotation resolves no responder rather than guessing
 ok 36 - an empty rotation resolves no responder rather than guessing
   ---
-  duration_ms: 0.142788
+  duration_ms: 0.051558
   type: 'test'
   ...
 # Subtest: upcoming handoffs are chronological and deterministic
 ok 37 - upcoming handoffs are chronological and deterministic
   ---
-  duration_ms: 0.59874
+  duration_ms: 0.290339
   type: 'test'
   ...
 # Subtest: daylight saving cannot skip or duplicate a handoff
 ok 38 - daylight saving cannot skip or duplicate a handoff
   ---
-  duration_ms: 4.438674
+  duration_ms: 2.485145
   type: 'test'
   ...
 # Subtest: an active override wins over the rotation without rewriting it
 ok 39 - an active override wins over the rotation without rewriting it
   ---
-  duration_ms: 0.468617
+  duration_ms: 0.285331
   type: 'test'
   ...
 # Subtest: override windows are half-open and validated
 ok 40 - override windows are half-open and validated
   ---
-  duration_ms: 0.236773
+  duration_ms: 0.104218
   type: 'test'
   ...
 # Subtest: overlapping overrides resolve deterministically instead of ambiguously
 ok 41 - overlapping overrides resolve deterministically instead of ambiguously
   ---
-  duration_ms: 0.891097
+  duration_ms: 0.527487
   type: 'test'
   ...
 # Subtest: schedule state gates resolution
 ok 42 - schedule state gates resolution
   ---
-  duration_ms: 0.228808
+  duration_ms: 0.116526
   type: 'test'
   ...
 # Subtest: rule ordering is explicit and never depends on row order
 ok 43 - rule ordering is explicit and never depends on row order
   ---
-  duration_ms: 0.351287
+  duration_ms: 0.177808
   type: 'test'
   ...
 # Subtest: rule matching is exact, case-folded and has no expression language
 ok 44 - rule matching is exact, case-folded and has no expression language
   ---
-  duration_ms: 0.253765
+  duration_ms: 0.138609
   type: 'test'
   ...
 # Subtest: the first matching rule in deterministic order wins
 ok 45 - the first matching rule in deterministic order wins
   ---
-  duration_ms: 0.247884
+  duration_ms: 0.146281
   type: 'test'
   ...
 # {
@@ -386,7 +386,7 @@ ok 45 - the first matching rule in deterministic order wins
 # Subtest: PostgreSQL migration/store contract
 ok 46 - PostgreSQL migration/store contract
   ---
-  duration_ms: 156.926113
+  duration_ms: 101.855793
   type: 'test'
   ...
 # {
@@ -401,199 +401,199 @@ ok 46 - PostgreSQL migration/store contract
 # Subtest: PostgreSQL Relay 0.2 alert routing and on-call store contract
 ok 47 - PostgreSQL Relay 0.2 alert routing and on-call store contract
   ---
-  duration_ms: 347.831312
+  duration_ms: 350.310046
   type: 'test'
   ...
 # Subtest: only Slack Incoming Webhook endpoints are stored or called
 ok 48 - only Slack Incoming Webhook endpoints are stored or called
   ---
-  duration_ms: 2.411832
+  duration_ms: 1.374377
   type: 'test'
   ...
 # Subtest: Slack payloads neutralize every alert-controlled mention primitive
 ok 49 - Slack payloads neutralize every alert-controlled mention primitive
   ---
-  duration_ms: 1.07996
+  duration_ms: 0.621089
   type: 'test'
   ...
 # Subtest: Slack delivery attaches an HTTP status so the retry policy can classify it
 ok 50 - Slack delivery attaches an HTTP status so the retry policy can classify it
   ---
-  duration_ms: 19.006387
+  duration_ms: 10.172021
   type: 'test'
   ...
 # Subtest: SMTP messages carry a safe recipient, subject and body and never expose the password
 ok 51 - SMTP messages carry a safe recipient, subject and body and never expose the password
   ---
-  duration_ms: 1.601977
+  duration_ms: 0.868873
   type: 'test'
   ...
 # Subtest: an alert can never choose its own email recipient
 ok 52 - an alert can never choose its own email recipient
   ---
-  duration_ms: 0.414846
+  duration_ms: 0.216267
   type: 'test'
   ...
 # Subtest: SMTP failures classify temporary, permanent and authentication responses correctly
 ok 53 - SMTP failures classify temporary, permanent and authentication responses correctly
   ---
-  duration_ms: 1.086984
+  duration_ms: 0.527097
   type: 'test'
   ...
 # Subtest: SMTP configuration is validated without ever echoing secrets back
 ok 54 - SMTP configuration is validated without ever echoing secrets back
   ---
-  duration_ms: 0.932634
+  duration_ms: 0.499274
   type: 'test'
   ...
 # Subtest: the bounded retry plan is deterministic and terminal at the limit
 ok 55 - the bounded retry plan is deterministic and terminal at the limit
   ---
-  duration_ms: 1.099948
+  duration_ms: 0.68178
   type: 'test'
   ...
 # Subtest: E2E: alert → routing rule → on-call schedule → responder → notification → acknowledgement → incident
 ok 56 - E2E: alert → routing rule → on-call schedule → responder → notification → acknowledgement → incident
   ---
-  duration_ms: 387.138868
+  duration_ms: 258.000494
   type: 'test'
   ...
 # Subtest: an ingested alert is routed, resolved to the on-call responder, recorded and notified
 ok 57 - an ingested alert is routed, resolved to the on-call responder, recorded and notified
   ---
-  duration_ms: 369.210285
+  duration_ms: 219.84103
   type: 'test'
   ...
 # Subtest: a Discord identity mapping adds a real mention and stays inside the allowed list
 ok 58 - a Discord identity mapping adds a real mention and stays inside the allowed list
   ---
-  duration_ms: 279.830935
+  duration_ms: 177.32284
   type: 'test'
   ...
 # Subtest: the on-call answer is deterministic across handoffs and queryable at any timestamp
 ok 59 - the on-call answer is deterministic across handoffs and queryable at any timestamp
   ---
-  duration_ms: 276.517076
+  duration_ms: 178.547607
   type: 'test'
   ...
 # Subtest: overrides take precedence, reject overlaps, and the rotation resumes unchanged
 ok 60 - overrides take precedence, reject overlaps, and the rotation resumes unchanged
   ---
-  duration_ms: 278.229228
+  duration_ms: 184.246644
   type: 'test'
   ...
 # Subtest: rule precedence, non-matching alerts and disabled rules behave deterministically
 ok 61 - rule precedence, non-matching alerts and disabled rules behave deterministically
   ---
-  duration_ms: 297.192839
+  duration_ms: 194.543343
   type: 'test'
   ...
 # Subtest: a disabled schedule or an empty rotation resolves nobody instead of guessing
 ok 62 - a disabled schedule or an empty rotation resolves nobody instead of guessing
   ---
-  duration_ms: 264.83768
+  duration_ms: 171.96074
   type: 'test'
   ...
 # Subtest: retried and concurrent intake of the same alert never duplicates routing or notification
 ok 63 - retried and concurrent intake of the same alert never duplicates routing or notification
   ---
-  duration_ms: 283.056356
+  duration_ms: 180.926069
   type: 'test'
   ...
 # Subtest: notification failure never rolls back the alert and never leaks the webhook secret
 ok 64 - notification failure never rolls back the alert and never leaks the webhook secret
   ---
-  duration_ms: 269.010625
+  duration_ms: 173.711234
   type: 'test'
   ...
 # Subtest: acknowledgement is authorized, idempotent, and never conflated with incident resolution
 ok 65 - acknowledgement is authorized, idempotent, and never conflated with incident resolution
   ---
-  duration_ms: 280.559127
+  duration_ms: 181.208695
   type: 'test'
   ...
 # Subtest: alerts that predate routing can be evaluated explicitly, then acknowledged
 ok 66 - alerts that predate routing can be evaluated explicitly, then acknowledged
   ---
-  duration_ms: 279.982119
+  duration_ms: 171.224959
   type: 'test'
   ...
 # Subtest: historical routing records never change when the rotation, rule or schedule changes later
 ok 67 - historical routing records never change when the rotation, rule or schedule changes later
   ---
-  duration_ms: 272.915679
+  duration_ms: 176.416889
   type: 'test'
   ...
 # Subtest: cross-organization access to teams, schedules, rules and alerts is refused
 ok 68 - cross-organization access to teams, schedules, rules and alerts is refused
   ---
-  duration_ms: 317.384356
+  duration_ms: 212.196302
   type: 'test'
   ...
 # Subtest: configuration authority follows the existing role model
 ok 69 - configuration authority follows the existing role model
   ---
-  duration_ms: 389.549758
+  duration_ms: 259.6728
   type: 'test'
   ...
 # Subtest: malformed timezones, intervals, Discord ids and hostile rule or alert input are rejected
 ok 70 - malformed timezones, intervals, Discord ids and hostile rule or alert input are rejected
   ---
-  duration_ms: 378.904358
+  duration_ms: 258.641924
   type: 'test'
   ...
 # Subtest: creating an incident from an alert is explicit, traceable and cannot be repeated
 ok 71 - creating an incident from an alert is explicit, traceable and cannot be repeated
   ---
-  duration_ms: 271.964922
+  duration_ms: 176.799537
   type: 'test'
   ...
 # Subtest: public status surfaces expose none of the internal on-call configuration
 ok 72 - public status surfaces expose none of the internal on-call configuration
   ---
-  duration_ms: 293.550375
+  duration_ms: 189.352254
   type: 'test'
   ...
 # Subtest: passwords use salted scrypt and verify safely
 ok 73 - passwords use salted scrypt and verify safely
   ---
-  duration_ms: 155.142318
+  duration_ms: 93.246027
   type: 'test'
   ...
 # Subtest: integration secrets round-trip with AES-GCM and reject tampering
 ok 74 - integration secrets round-trip with AES-GCM and reject tampering
   ---
-  duration_ms: 1.542034
+  duration_ms: 1.027431
   type: 'test'
   ...
 # Subtest: public renderer escapes representative user-controlled status content before HTML insertion
 ok 75 - public renderer escapes representative user-controlled status content before HTML insertion
   ---
-  duration_ms: 5.760916
+  duration_ms: 3.368927
   type: 'test'
   ...
 # Subtest: static assets win over application document routes and preserve MIME/body integrity
 ok 76 - static assets win over application document routes and preserve MIME/body integrity
   ---
-  duration_ms: 41.899201
+  duration_ms: 23.74538
   type: 'test'
   ...
 # Subtest: only supported SPA document routes receive the application shell
 ok 77 - only supported SPA document routes receive the application shell
   ---
-  duration_ms: 40.046445
+  duration_ms: 3022.930926
   type: 'test'
   ...
 # Subtest: missing assets and unsupported document-like paths return 404 instead of the shell
 ok 78 - missing assets and unsupported document-like paths return 404 instead of the shell
   ---
-  duration_ms: 24.903354
+  duration_ms: 17.025818
   type: 'test'
   ...
 # Subtest: path traversal never serves files outside the static directory
 ok 79 - path traversal never serves files outside the static directory
   ---
-  duration_ms: 10.637617
+  duration_ms: 7.772368
   type: 'test'
   ...
 # {
@@ -608,7 +608,7 @@ ok 79 - path traversal never serves files outside the static directory
 # Subtest: concurrent workers claim disjoint work and never page the same responder twice
 ok 80 - concurrent workers claim disjoint work and never page the same responder twice
   ---
-  duration_ms: 504.984123
+  duration_ms: 345.831984
   type: 'test'
   ...
 # {
@@ -623,7 +623,7 @@ ok 80 - concurrent workers claim disjoint work and never page the same responder
 # Subtest: an expired lease is reclaimed after a crash and the dead worker cannot overwrite the new outcome
 ok 81 - an expired lease is reclaimed after a crash and the dead worker cannot overwrite the new outcome
   ---
-  duration_ms: 151.406261
+  duration_ms: 96.999087
   type: 'test'
   ...
 # {
@@ -638,7 +638,7 @@ ok 81 - an expired lease is reclaimed after a crash and the dead worker cannot o
 # Subtest: a restarted worker recovers abandoned work and keeps one immutable attempt per provider call
 ok 82 - a restarted worker recovers abandoned work and keeps one immutable attempt per provider call
   ---
-  duration_ms: 180.64891
+  duration_ms: 132.653719
   type: 'test'
   ...
 # {
@@ -653,7 +653,7 @@ ok 82 - a restarted worker recovers abandoned work and keeps one immutable attem
 # Subtest: an acknowledgement cancels unexecuted escalation steps and no page is ever created after it commits
 ok 83 - an acknowledgement cancels unexecuted escalation steps and no page is ever created after it commits
   ---
-  duration_ms: 185.978574
+  duration_ms: 162.684291
   type: 'test'
   ...
 1..83
@@ -664,7 +664,7 @@ ok 83 - an acknowledgement cancels unexecuted escalation steps and no page is ev
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 10906.073236
+# duration_ms 10102.145397
 ```
 
 ## 05-migration-upgrade
@@ -678,19 +678,19 @@ TAP version 13
 # Subtest: migration ordering is derived from filenames, not readdir order
 ok 1 - migration ordering is derived from filenames, not readdir order
   ---
-  duration_ms: 1.402263
+  duration_ms: 0.844005
   type: 'test'
   ...
 # Subtest: migration runner discovers migration 003 after 001 and 002
 ok 2 - migration runner discovers migration 003 after 001 and 002
   ---
-  duration_ms: 8.70875
+  duration_ms: 4.52237
   type: 'test'
   ...
 # Subtest: SQL statement splitting survives comments, strings and dollar-quoted bodies
 ok 3 - SQL statement splitting survives comments, strings and dollar-quoted bodies
   ---
-  duration_ms: 0.488694
+  duration_ms: 0.343349
   type: 'test'
   ...
 # {
@@ -723,7 +723,7 @@ ok 3 - SQL statement splitting survives comments, strings and dollar-quoted bodi
 # Subtest: upgrading a populated Relay 0.1 database applies 002→003 and preserves all 0.1 data
 ok 4 - upgrading a populated Relay 0.1 database applies 002→003 and preserves all 0.1 data
   ---
-  duration_ms: 616.93685
+  duration_ms: 631.577848
   type: 'test'
   ...
 1..4
@@ -734,7 +734,7 @@ ok 4 - upgrading a populated Relay 0.1 database applies 002→003 and preserves 
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 692.892543
+# duration_ms 677.764448
 ```
 
 ## 06-worker-qualification
@@ -753,7 +753,7 @@ TAP version 13
 # Subtest: concurrent workers claim disjoint work and never page the same responder twice
 ok 1 - concurrent workers claim disjoint work and never page the same responder twice
   ---
-  duration_ms: 529.744137
+  duration_ms: 365.548477
   type: 'test'
   ...
 # {
@@ -768,7 +768,7 @@ ok 1 - concurrent workers claim disjoint work and never page the same responder 
 # Subtest: an expired lease is reclaimed after a crash and the dead worker cannot overwrite the new outcome
 ok 2 - an expired lease is reclaimed after a crash and the dead worker cannot overwrite the new outcome
   ---
-  duration_ms: 158.181326
+  duration_ms: 99.739247
   type: 'test'
   ...
 # {
@@ -783,7 +783,7 @@ ok 2 - an expired lease is reclaimed after a crash and the dead worker cannot ov
 # Subtest: a restarted worker recovers abandoned work and keeps one immutable attempt per provider call
 ok 3 - a restarted worker recovers abandoned work and keeps one immutable attempt per provider call
   ---
-  duration_ms: 180.660242
+  duration_ms: 136.004123
   type: 'test'
   ...
 # {
@@ -798,7 +798,7 @@ ok 3 - a restarted worker recovers abandoned work and keeps one immutable attemp
 # Subtest: an acknowledgement cancels unexecuted escalation steps and no page is ever created after it commits
 ok 4 - an acknowledgement cancels unexecuted escalation steps and no page is ever created after it commits
   ---
-  duration_ms: 197.367013
+  duration_ms: 126.099639
   type: 'test'
   ...
 1..4
@@ -809,7 +809,7 @@ ok 4 - an acknowledgement cancels unexecuted escalation steps and no page is eve
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 1143.125552
+# duration_ms 773.036831
 ```
 
 ## 07-oncall-non-utc
@@ -819,103 +819,103 @@ TAP version 13
 # Subtest: timezone validation accepts IANA identifiers and rejects everything else
 ok 1 - timezone validation accepts IANA identifiers and rejects everything else
   ---
-  duration_ms: 17.560993
+  duration_ms: 9.766676
   type: 'test'
   ...
 # Subtest: timezone rendering is explicit and independent of the host timezone
 ok 2 - timezone rendering is explicit and independent of the host timezone
   ---
-  duration_ms: 2.079281
+  duration_ms: 1.243899
   type: 'test'
   ...
 # Subtest: rotation intervals are validated unambiguously in minutes
 ok 3 - rotation intervals are validated unambiguously in minutes
   ---
-  duration_ms: 0.317254
+  duration_ms: 0.22463
   type: 'test'
   ...
 # Subtest: rotation selection is deterministic at period boundaries
 ok 4 - rotation selection is deterministic at period boundaries
   ---
-  duration_ms: 0.611685
+  duration_ms: 0.208125
   type: 'test'
   ...
 # Subtest: rotation resolves correctly across many handoffs
 ok 5 - rotation resolves correctly across many handoffs
   ---
-  duration_ms: 1.263334
+  duration_ms: 0.379373
   type: 'test'
   ...
 # Subtest: rotation period boundaries are absolute UTC instants
 ok 6 - rotation period boundaries are absolute UTC instants
   ---
-  duration_ms: 0.305461
+  duration_ms: 0.077998
   type: 'test'
   ...
 # Subtest: a rotation that has not started yet resolves no responder
 ok 7 - a rotation that has not started yet resolves no responder
   ---
-  duration_ms: 0.239508
+  duration_ms: 0.077217
   type: 'test'
   ...
 # Subtest: an empty rotation resolves no responder rather than guessing
 ok 8 - an empty rotation resolves no responder rather than guessing
   ---
-  duration_ms: 0.239107
+  duration_ms: 0.054102
   type: 'test'
   ...
 # Subtest: upcoming handoffs are chronological and deterministic
 ok 9 - upcoming handoffs are chronological and deterministic
   ---
-  duration_ms: 0.849801
+  duration_ms: 0.289087
   type: 'test'
   ...
 # Subtest: daylight saving cannot skip or duplicate a handoff
 ok 10 - daylight saving cannot skip or duplicate a handoff
   ---
-  duration_ms: 4.530619
+  duration_ms: 2.539626
   type: 'test'
   ...
 # Subtest: an active override wins over the rotation without rewriting it
 ok 11 - an active override wins over the rotation without rewriting it
   ---
-  duration_ms: 0.497431
+  duration_ms: 0.295888
   type: 'test'
   ...
 # Subtest: override windows are half-open and validated
 ok 12 - override windows are half-open and validated
   ---
-  duration_ms: 0.215504
+  duration_ms: 0.101454
   type: 'test'
   ...
 # Subtest: overlapping overrides resolve deterministically instead of ambiguously
 ok 13 - overlapping overrides resolve deterministically instead of ambiguously
   ---
-  duration_ms: 0.944759
+  duration_ms: 0.558844
   type: 'test'
   ...
 # Subtest: schedule state gates resolution
 ok 14 - schedule state gates resolution
   ---
-  duration_ms: 0.226223
+  duration_ms: 0.126151
   type: 'test'
   ...
 # Subtest: rule ordering is explicit and never depends on row order
 ok 15 - rule ordering is explicit and never depends on row order
   ---
-  duration_ms: 0.353402
+  duration_ms: 0.179652
   type: 'test'
   ...
 # Subtest: rule matching is exact, case-folded and has no expression language
 ok 16 - rule matching is exact, case-folded and has no expression language
   ---
-  duration_ms: 0.288941
+  duration_ms: 0.124428
   type: 'test'
   ...
 # Subtest: the first matching rule in deterministic order wins
 ok 17 - the first matching rule in deterministic order wins
   ---
-  duration_ms: 0.248635
+  duration_ms: 0.12575
   type: 'test'
   ...
 1..17
@@ -926,7 +926,7 @@ ok 17 - the first matching rule in deterministic order wins
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 116.119024
+# duration_ms 57.566562
 ```
 
 ## 08-secret-scan
@@ -942,16 +942,16 @@ Secret scan passed: no known credential patterns detected.
 ## 09-image-build
 
 ```text
-#7 sha256:e554276b05e6306c5ad33cd85bfa7f0693083e21f6114db5abf60a20fb413039 1.26MB / 1.26MB 0.1s done
 #7 sha256:d39db1cf9caa4f49c5a2e67111fbe6e0d5eea8ede550cb82f3dc2b79712688d6 447B / 447B 0.1s done
-#7 sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 49.28MB / 55.59MB 0.2s
-#7 sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 55.59MB / 55.59MB 0.2s done
+#7 sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 55.59MB / 55.59MB 0.4s
+#7 sha256:e554276b05e6306c5ad33cd85bfa7f0693083e21f6114db5abf60a20fb413039 1.26MB / 1.26MB 0.3s done
+#7 sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 55.59MB / 55.59MB 0.6s done
 #7 extracting sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 0.1s
-#7 extracting sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 1.2s done
+#7 extracting sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937 0.8s done
 #7 extracting sha256:e554276b05e6306c5ad33cd85bfa7f0693083e21f6114db5abf60a20fb413039
 #7 extracting sha256:e554276b05e6306c5ad33cd85bfa7f0693083e21f6114db5abf60a20fb413039 0.0s done
 #7 extracting sha256:d39db1cf9caa4f49c5a2e67111fbe6e0d5eea8ede550cb82f3dc2b79712688d6 done
-#7 DONE 1.7s
+#7 DONE 2.5s
 
 #8 [2/5] WORKDIR /app
 #8 DONE 0.0s
@@ -960,24 +960,24 @@ Secret scan passed: no known credential patterns detected.
 #9 DONE 0.0s
 
 #10 [4/5] RUN npm ci --omit=dev --no-audit --no-fund
-#10 0.864 
-#10 0.864 added 2 packages in 664ms
-#10 0.865 npm notice
-#10 0.865 npm notice New major version of npm available! 10.9.9 -> 12.1.0
-#10 0.865 npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.1.0
-#10 0.865 npm notice To update run: npm install -g npm@12.1.0
-#10 0.865 npm notice
-#10 DONE 1.0s
+#10 0.563 
+#10 0.563 added 2 packages in 425ms
+#10 0.564 npm notice
+#10 0.564 npm notice New major version of npm available! 10.9.9 -> 12.1.0
+#10 0.564 npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.1.0
+#10 0.564 npm notice To update run: npm install -g npm@12.1.0
+#10 0.564 npm notice
+#10 DONE 0.7s
 
 #11 [5/5] COPY . .
 #11 DONE 0.0s
 
 #12 exporting to image
 #12 exporting layers
-#12 exporting layers 0.3s done
-#12 writing image sha256:77be2eb6a5db7ef3f9e18de300404dd936b82317049e6049c4dbb74a75460f51 done
+#12 exporting layers 0.2s done
+#12 writing image sha256:76c05279aba53cccabd8cf3c1db42d24bbfa53b5d594fd023666fd56c4017363 done
 #12 naming to docker.io/library/relay-relay done
-#12 DONE 0.3s
+#12 DONE 0.2s
 
 #13 resolving provenance for metadata file
 #13 DONE 0.0s
@@ -1006,8 +1006,8 @@ Secret scan passed: no known credential patterns detected.
 ## 11-compose-ps
 
 ```text
-{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:06:45 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"cda25c4a11fd","Image":"postgres:16-alpine","Labels":"com.docker.compose.image=sha256:81bd698b4594e751a3269e4dcd3e03a4a0ec0daf7b72e7aa1abd43cce9887542,com.docker.compose.oneoff=False,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.service=postgres,com.docker.compose.depends_on=,com.docker.compose.container-number=1,com.docker.compose.project=relay,com.docker.compose.version=2.38.2,com.docker.compose.config-hash=8000c8a4a9b3b3efd8e02388791910a7e8ba601e946815c00428b8ac56634f84","LocalVolumes":"1","Mounts":"relay_relay-po…","Name":"relay-postgres-1","Names":"relay-postgres-1","Networks":"relay_default","Ports":"5432/tcp","Project":"relay","Publishers":[{"URL":"","TargetPort":5432,"PublishedPort":0,"Protocol":"tcp"}],"RunningFor":"6 seconds ago","Service":"postgres","Size":"0B","State":"running","Status":"Up 5 seconds (healthy)"}
-{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:06:45 +0000 UTC","ExitCode":0,"Health":"","ID":"7db6b94adc5c","Image":"relay-relay","Labels":"com.docker.compose.container-number=1,com.docker.compose.oneoff=False,com.docker.compose.image=sha256:77be2eb6a5db7ef3f9e18de300404dd936b82317049e6049c4dbb74a75460f51,com.docker.compose.project=relay,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.service=relay,com.docker.compose.version=2.38.2,com.docker.compose.config-hash=a0dd1f2d82cabc3c6cc1725ccc0b39421542635e835eacd8ecc539699b6634c6,com.docker.compose.depends_on=postgres:service_healthy:false","LocalVolumes":"0","Mounts":"","Name":"relay-relay-1","Names":"relay-relay-1","Networks":"relay_default","Ports":"0.0.0.0:4000-\u003e4000/tcp, [::]:4000-\u003e4000/tcp","Project":"relay","Publishers":[{"URL":"0.0.0.0","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"},{"URL":"::","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"}],"RunningFor":"6 seconds ago","Service":"relay","Size":"0B","State":"running","Status":"Up Less than a second"}
+{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:17:22 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"841f59ae2dff","Image":"postgres:16-alpine","Labels":"com.docker.compose.oneoff=False,com.docker.compose.project=relay,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.container-number=1,com.docker.compose.depends_on=,com.docker.compose.image=sha256:81bd698b4594e751a3269e4dcd3e03a4a0ec0daf7b72e7aa1abd43cce9887542,com.docker.compose.config-hash=8000c8a4a9b3b3efd8e02388791910a7e8ba601e946815c00428b8ac56634f84,com.docker.compose.service=postgres,com.docker.compose.version=2.38.2","LocalVolumes":"1","Mounts":"relay_relay-po…","Name":"relay-postgres-1","Names":"relay-postgres-1","Networks":"relay_default","Ports":"5432/tcp","Project":"relay","Publishers":[{"URL":"","TargetPort":5432,"PublishedPort":0,"Protocol":"tcp"}],"RunningFor":"6 seconds ago","Service":"postgres","Size":"0B","State":"running","Status":"Up 5 seconds (healthy)"}
+{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:17:22 +0000 UTC","ExitCode":0,"Health":"","ID":"dfc5a77c4236","Image":"relay-relay","Labels":"com.docker.compose.project=relay,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.service=relay,com.docker.compose.version=2.38.2,com.docker.compose.config-hash=a0dd1f2d82cabc3c6cc1725ccc0b39421542635e835eacd8ecc539699b6634c6,com.docker.compose.container-number=1,com.docker.compose.oneoff=False,com.docker.compose.depends_on=postgres:service_healthy:false,com.docker.compose.image=sha256:76c05279aba53cccabd8cf3c1db42d24bbfa53b5d594fd023666fd56c4017363","LocalVolumes":"0","Mounts":"","Name":"relay-relay-1","Names":"relay-relay-1","Networks":"relay_default","Ports":"0.0.0.0:4000-\u003e4000/tcp, [::]:4000-\u003e4000/tcp","Project":"relay","Publishers":[{"URL":"0.0.0.0","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"},{"URL":"::","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"}],"RunningFor":"6 seconds ago","Service":"relay","Size":"0B","State":"running","Status":"Up Less than a second"}
 ```
 
 ## 12-health
@@ -1203,7 +1203,7 @@ Browser smoke passed: boot, MIME, routing, keyboard, dialog, publication review,
 > relay@0.2.0 verify:production
 > node scripts/production-e2e.mjs initial
 
-Production E2E PASS: {"organizationId":"bdc939bc-1023-4635-80e4-b7e2ad292aa9","incidentId":"1f0dc82e-bbab-4b68-beb2-b3723af29eae","statusSlug":"release-muil27ls-86db7afb","teamId":"39d3a54f-d48b-44b7-8abf-a956f1185572","scheduleId":"febde403-7701-486f-8508-1f5860884971","alertId":"be8c8742-2dd3-4eab-8ceb-570e511152fb"}
+Production E2E PASS: {"organizationId":"96d54666-0491-45da-9784-f37a20e80dc3","incidentId":"84471b5a-b3e0-4c7e-b6ba-7a2dcd4b231e","statusSlug":"release-muilfpge-249ae579","teamId":"00ecf3ce-52d0-41d4-a19d-a628b6d3778d","scheduleId":"170d6437-a187-4616-a674-d389affdcb15","alertId":"0db037b3-4390-4502-ac4d-134cf807d814"}
 ```
 
 ## 17-restart
@@ -1226,14 +1226,14 @@ relay healthy after restart (attempt 2)
 > relay@0.2.0 verify:restart
 > node scripts/production-e2e.mjs restart
 
-Restart persistence PASS: {"organizationId":"bdc939bc-1023-4635-80e4-b7e2ad292aa9","incidentId":"1f0dc82e-bbab-4b68-beb2-b3723af29eae","teamId":"39d3a54f-d48b-44b7-8abf-a956f1185572","scheduleId":"febde403-7701-486f-8508-1f5860884971","alertId":"be8c8742-2dd3-4eab-8ceb-570e511152fb"}
+Restart persistence PASS: {"organizationId":"96d54666-0491-45da-9784-f37a20e80dc3","incidentId":"84471b5a-b3e0-4c7e-b6ba-7a2dcd4b231e","teamId":"00ecf3ce-52d0-41d4-a19d-a628b6d3778d","scheduleId":"170d6437-a187-4616-a674-d389affdcb15","alertId":"0db037b3-4390-4502-ac4d-134cf807d814"}
 ```
 
 ## 20-compose-ps-final
 
 ```text
-{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:06:45 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"cda25c4a11fd","Image":"postgres:16-alpine","Labels":"com.docker.compose.config-hash=8000c8a4a9b3b3efd8e02388791910a7e8ba601e946815c00428b8ac56634f84,com.docker.compose.depends_on=,com.docker.compose.image=sha256:81bd698b4594e751a3269e4dcd3e03a4a0ec0daf7b72e7aa1abd43cce9887542,com.docker.compose.service=postgres,com.docker.compose.version=2.38.2,com.docker.compose.container-number=1,com.docker.compose.oneoff=False,com.docker.compose.project=relay,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay","LocalVolumes":"1","Mounts":"relay_relay-po…","Name":"relay-postgres-1","Names":"relay-postgres-1","Networks":"relay_default","Ports":"5432/tcp","Project":"relay","Publishers":[{"URL":"","TargetPort":5432,"PublishedPort":0,"Protocol":"tcp"}],"RunningFor":"44 seconds ago","Service":"postgres","Size":"0B","State":"running","Status":"Up 44 seconds (healthy)"}
-{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:06:45 +0000 UTC","ExitCode":0,"Health":"","ID":"7db6b94adc5c","Image":"relay-relay","Labels":"com.docker.compose.config-hash=a0dd1f2d82cabc3c6cc1725ccc0b39421542635e835eacd8ecc539699b6634c6,com.docker.compose.image=sha256:77be2eb6a5db7ef3f9e18de300404dd936b82317049e6049c4dbb74a75460f51,com.docker.compose.project=relay,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.service=relay,com.docker.compose.version=2.38.2,com.docker.compose.container-number=1,com.docker.compose.depends_on=postgres:service_healthy:false,com.docker.compose.oneoff=False,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay","LocalVolumes":"0","Mounts":"","Name":"relay-relay-1","Names":"relay-relay-1","Networks":"relay_default","Ports":"0.0.0.0:4000-\u003e4000/tcp, [::]:4000-\u003e4000/tcp","Project":"relay","Publishers":[{"URL":"0.0.0.0","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"},{"URL":"::","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"}],"RunningFor":"44 seconds ago","Service":"relay","Size":"0B","State":"running","Status":"Up 2 seconds"}
+{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:17:22 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"841f59ae2dff","Image":"postgres:16-alpine","Labels":"com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.version=2.38.2,com.docker.compose.config-hash=8000c8a4a9b3b3efd8e02388791910a7e8ba601e946815c00428b8ac56634f84,com.docker.compose.container-number=1,com.docker.compose.project=relay,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.service=postgres,com.docker.compose.depends_on=,com.docker.compose.image=sha256:81bd698b4594e751a3269e4dcd3e03a4a0ec0daf7b72e7aa1abd43cce9887542,com.docker.compose.oneoff=False","LocalVolumes":"1","Mounts":"relay_relay-po…","Name":"relay-postgres-1","Names":"relay-postgres-1","Networks":"relay_default","Ports":"5432/tcp","Project":"relay","Publishers":[{"URL":"","TargetPort":5432,"PublishedPort":0,"Protocol":"tcp"}],"RunningFor":"37 seconds ago","Service":"postgres","Size":"0B","State":"running","Status":"Up 37 seconds (healthy)"}
+{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-26 16:17:22 +0000 UTC","ExitCode":0,"Health":"","ID":"dfc5a77c4236","Image":"relay-relay","Labels":"com.docker.compose.config-hash=a0dd1f2d82cabc3c6cc1725ccc0b39421542635e835eacd8ecc539699b6634c6,com.docker.compose.container-number=1,com.docker.compose.oneoff=False,com.docker.compose.project=relay,com.docker.compose.service=relay,com.docker.compose.depends_on=postgres:service_healthy:false,com.docker.compose.image=sha256:76c05279aba53cccabd8cf3c1db42d24bbfa53b5d594fd023666fd56c4017363,com.docker.compose.project.config_files=/home/runner/work/Relay/Relay/docker-compose.yml,com.docker.compose.project.working_dir=/home/runner/work/Relay/Relay,com.docker.compose.version=2.38.2","LocalVolumes":"0","Mounts":"","Name":"relay-relay-1","Names":"relay-relay-1","Networks":"relay_default","Ports":"0.0.0.0:4000-\u003e4000/tcp, [::]:4000-\u003e4000/tcp","Project":"relay","Publishers":[{"URL":"0.0.0.0","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"},{"URL":"::","TargetPort":4000,"PublishedPort":4000,"Protocol":"tcp"}],"RunningFor":"37 seconds ago","Service":"relay","Size":"0B","State":"running","Status":"Up 2 seconds"}
 ```
 
 ## 21-qualification-suite
