@@ -39,6 +39,19 @@ async function shot(name, session) {
   const {data} = await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false},session);
   await writeFile(path.join(shots,name),Buffer.from(data,'base64'));
 }
+async function positionSection(selector, session) {
+  const position = await evaluate(`(() => {
+    // The site uses smooth scrolling for visitors; evidence positioning must be immediate.
+    document.documentElement.style.scrollBehavior = 'auto';
+    const section = document.querySelector(${JSON.stringify(selector)});
+    section.scrollIntoView({behavior:'instant',block:'start'});
+    const rect = section.getBoundingClientRect();
+    return {top:rect.top,bottom:rect.bottom,height:innerHeight};
+  })()`,session);
+  assert(Math.abs(position.top) <= 2 && position.bottom > 0,
+    `${selector} is not aligned within the screenshot viewport: ${JSON.stringify(position)}`);
+  console.log(`PASS screenshot position ${selector}: top=${position.top}`);
+}
 async function focusTab(session) { await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9},session); await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9},session); }
 async function main() {
   await mkdir(shots,{recursive:true});
@@ -88,9 +101,9 @@ async function main() {
     });
     if (width === 1440) {
       await shot('desktop-hero-1440x900.png',s);
-      await evaluate('document.querySelector("#product").scrollIntoView()',s); await delay(180);
+      await positionSection('#product',s);
       await shot('desktop-product-or-workflow.png',s);
-      await evaluate('document.querySelector("#self-host").scrollIntoView()',s); await delay(180);
+      await positionSection('#self-host',s);
       await shot('desktop-self-host.png',s);
     }
     if (width === 390) await shot('mobile-390x844.png',s);
