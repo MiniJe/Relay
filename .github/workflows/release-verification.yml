@@ -3,6 +3,8 @@ name: release-verification
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -33,7 +35,7 @@ jobs:
     env:
       DATABASE_URL: postgres://relay:relay_test_password@127.0.0.1:5432/relay_test
       POSTGRES_PASSWORD: relay_compose_password
-      APP_ORIGIN: http://localhost:4000
+      APP_ORIGIN: http://127.0.0.1:4000
       COOKIE_SECURE: "false"
       ALERT_INGEST_KEY: relay-ci-alert-key-not-production
       INTEGRATION_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -99,6 +101,20 @@ jobs:
         run: |
           curl --fail --silent --show-error http://127.0.0.1:4000/ | grep -qi relay
           curl --fail --silent --show-error http://127.0.0.1:4000/api/v1/openapi.json >/tmp/openapi.json
+
+      - name: Real-browser boot and routing verification
+        env:
+          RELAY_BROWSER: /usr/bin/google-chrome
+          RELAY_BROWSER_SCREENSHOT_DIR: /tmp/relay-browser-smoke
+        run: |
+          set +e
+          npm run verify:browser > /tmp/relay-browser-smoke.log 2>&1
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            grep -E '^FAIL' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' | head -10
+            tail -c 3200 /tmp/relay-browser-smoke.log | tr '\n' '~' | sed 's/^/::error::smoke-tail| /'
+          fi
+          exit $code
 
       - name: Production PostgreSQL-backed E2E
         run: npm run verify:production

@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Open-source incident lifecycle and status communication platform.",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node apps/api/src/server.mjs",
     "start": "node apps/api/src/server.mjs",
@@ -18,7 +20,8 @@
     "check:secrets": "node scripts/secret-scan.mjs",
     "verify:production": "node scripts/production-e2e.mjs initial",
     "verify:restart": "node scripts/production-e2e.mjs restart",
-    "verify": "npm run build && npm test && npm run check:secrets"
+    "verify": "npm run build && npm test && npm run check:secrets",
+    "verify:browser": "node scripts/browser-smoke.mjs"
   },
   "dependencies": {
     "postgres": "3.4.7"
