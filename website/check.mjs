@@ -1,0 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const html = await readFile(new URL('index.html', import.meta.url), 'utf8');
+const css = await readFile(new URL('styles.css', import.meta.url), 'utf8');
+for (const phrase of ['Beacon', '12.4k', '12,431', '1,208', '3.1M', '18,420', 'Hana Ito', 'v2.6', 'v2.5', 'subscriber', 'PagerDuty', 'Opsgenie', 'SAML', 'SCIM', 'Terraform', 'Slack', 'SMS paging']) assert.ok(!html.includes(phrase), `Forbidden claim: ${phrase}`);
+for (const id of [...html.matchAll(/href="#([^"]+)"/g)].map(m => m[1])) assert.ok(html.includes(`id="${id}"`), `Broken anchor: ${id}`);
+for (const url of [...html.matchAll(/href="(https?:[^"]+)"/g)].map(m => m[1])) assert.ok(url.startsWith('https://github.com/MiniJe/Relay'), `Unexpected external target: ${url}`);
+assert.ok(html.includes('<main') && html.includes('<nav') && html.includes('<footer') && html.includes('Skip to content'));
+assert.ok(css.includes('prefers-reduced-motion') && css.includes(':focus-visible'));
+console.log('Website static build/content and link checks passed.');

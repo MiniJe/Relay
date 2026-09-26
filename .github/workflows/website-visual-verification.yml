@@ -1,0 +1,41 @@
+name: website-visual-verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'docs/website/**'
+      - '.github/workflows/website-visual-verification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Website build and content checks
+        run: |
+          npm run build --prefix website
+          npm run test --prefix website
+      - name: Verify hosted Chrome and render website
+        env:
+          RELAY_BROWSER: /usr/bin/google-chrome
+          WEBSITE_SCREENSHOT_DIR: website/screenshots
+        run: |
+          test -x /usr/bin/google-chrome
+          node website/visual-check.mjs
+      - name: Upload visual review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-website-visual-review
+          path: website/screenshots/*.png
+          if-no-files-found: warn
