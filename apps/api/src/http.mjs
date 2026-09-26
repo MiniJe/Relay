@@ -10,9 +10,12 @@ const mime = {
 
 const appDocumentRoutes = new Set([
   '/app','/app/','/app/services','/app/components','/app/incidents','/app/status-pages','/app/settings',
-  '/app/alerts','/app/teams','/app/oncall','/app/routing'
+  '/app/alerts','/app/escalations','/app/teams','/app/oncall','/app/routing'
 ]);
 const appIncidentRoute = /^\/app\/incidents\/[a-zA-Z0-9_-]+\/?$/;
+// Alert detail is a deep link like the incident workspace: a refresh must boot
+// the application shell instead of returning a 404 document.
+const appAlertRoute = /^\/app\/alerts\/[a-zA-Z0-9_-]+\/?$/;
 const statusPageRoute = /^\/status\/[a-z0-9-]+\/?$/;
 const statusIncidentRoute = /^\/status\/[a-z0-9-]+\/incidents\/[a-zA-Z0-9_-]+\/?$/;
 
@@ -50,7 +53,7 @@ export function assertMutationOrigin(req, appOrigin) {
 
 function isDocumentRoute(pathname) {
   return pathname === '/' || pathname === '/signin' || pathname === '/register' ||
-    appDocumentRoutes.has(pathname) || appIncidentRoute.test(pathname) ||
+    appDocumentRoutes.has(pathname) || appIncidentRoute.test(pathname) || appAlertRoute.test(pathname) ||
     statusPageRoute.test(pathname) || statusIncidentRoute.test(pathname);
 }
 

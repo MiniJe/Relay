@@ -51,3 +51,24 @@
 .member-list>*,.chips>*,.rotation-list>li,.section-head>*,.oncall-meta>*,.user-chip>*{min-width:0}
 .user-meta span,.rotation-list .subtext,.chip,.oncall-meta .subtext,.override-note{overflow-wrap:anywhere}
 @media(max-width:760px){.grid-4,.grid-3,.grid-2{grid-template-columns:minmax(0,1fr)}.panel-form{grid-template-columns:minmax(0,1fr)}.panel-form .input,.panel-form .select,.panel-form .textarea,.inline-form .input,.inline-form .select{min-width:0;width:100%}.section-head{flex-wrap:wrap;gap:4px}}
+/* Relay 0.2 / RLY-0.2-M-002 — durable delivery and escalation surfaces.
+   Delivery state is always shown with a text label next to the dot, so the
+   colour is a hint rather than the message. Attempt trails are compact ordered
+   lists inside the delivery table. */
+.delivery-SENT{color:#86efac;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.22)}
+.delivery-FAILED{color:#fca5a5;background:rgba(239,68,68,.09);border-color:rgba(239,68,68,.24)}
+.delivery-RETRYING{color:#fde047;background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.22)}
+.delivery-PENDING,.delivery-IN_FLIGHT{color:#93c5fd;background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.22)}
+.delivery-CANCELLED{color:#a1a1aa}
+.escalation-PENDING{color:#93c5fd;background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.22)}
+.escalation-IN_FLIGHT{color:#fde047;background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.22)}
+.escalation-COMPLETED{color:#86efac;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.22)}
+.escalation-FAILED{color:#fca5a5;background:rgba(239,68,68,.09);border-color:rgba(239,68,68,.24)}
+.escalation-CANCELLED_ACKNOWLEDGED{color:#a1a1aa}
+.attempt-list{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;min-width:0}
+.attempt-list>li{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.attempt-list .subtext{overflow-wrap:anywhere}
+.escalation-step{display:flex;flex-direction:column;gap:6px;min-width:0}
+.escalation-step h3{font-size:14px;margin:0}
+.policy-step{align-items:flex-end;border-top:1px solid var(--border);padding-top:10px}
+.policy-step:first-child{border-top:0}

@@ -26,6 +26,7 @@
     "verify:surface": "node scripts/verify-release-surface.mjs"
   },
   "dependencies": {
+    "nodemailer": "^10.0.10",
     "postgres": "3.4.7"
   }
 }

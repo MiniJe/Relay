@@ -123,8 +123,18 @@ export const openapi = {
     },
     '/organizations/{organizationId}/routing-rules/{ruleId}': {
       get: { summary: 'Routing rule detail' },
-      patch: { summary: 'Update a rule, its enabled state, priority, conditions or target schedule (OWNER/ADMIN)' },
+      patch: { summary: 'Update a rule, its enabled state, priority, conditions, notification channels or escalation policy (OWNER/ADMIN)' },
       delete: { summary: 'Delete a routing rule (OWNER/ADMIN)', responses: { '204': { description: 'Deleted' } } }
+    },
+    '/organizations/{organizationId}/escalation-policies': {
+      get: { summary: 'List escalation policies and ordered steps' },
+      post: { summary: 'Create an organization-scoped escalation policy with ordered steps (OWNER/ADMIN)', requestBody: json(ref('EscalationPolicyInput')), responses: { '201': { description: 'Created policy' } } }
+    },
+    '/organizations/{organizationId}/escalation-policies/{policyId}': {
+      get: { summary: 'Read escalation policy and steps' },
+      put: { summary: 'Replace policy definition and steps (OWNER/ADMIN); existing alert plans are immutable snapshots' },
+      patch: { summary: 'Replace policy definition and steps (OWNER/ADMIN)' },
+      delete: { summary: 'Delete policy for future routing; existing materialized jobs remain independent', responses: { '204': { description: 'Deleted' } } }
     },
 
     // ---- Relay 0.2: alerts and routing results ----
@@ -156,6 +166,30 @@ export const openapi = {
         responses: ok('Routing record')
       }
     },
+    '/organizations/{organizationId}/alerts/{alertId}/deliveries': {
+      get: {
+        summary: 'Delivery audit for one alert',
+        description: 'Every logical page created for the alert, with its immutable attempt history. Readable by any organization member; provider secrets are never part of a delivery or an attempt.',
+        responses: ok('Deliveries plus a compact summary (total, status, label, attempts, nextAttemptAt, providers)')
+      }
+    },
+    '/organizations/{organizationId}/deliveries/{deliveryId}': {
+      get: { summary: 'One delivery with its attempt history and the alert it belongs to', responses: { '200': { description: 'Delivery' }, '404': { description: 'Not found in this organization' } } }
+    },
+    '/organizations/{organizationId}/deliveries/{deliveryId}/retry': {
+      post: {
+        summary: 'Manually retry a failed page (OWNER/ADMIN/RESPONDER)',
+        description: 'A manual retry adds an attempt; it never rewrites history. VIEWER and non-members are rejected, an already delivered page answers 409 DELIVERY_ALREADY_SENT, and a page cancelled by acknowledgement answers 409 DELIVERY_CANCELLED.',
+        responses: { '202': { description: 'Retry scheduled and attempted under the same bounded policy' }, '403': { description: 'Not authorized' }, '409': { description: 'Not retryable' } }
+      }
+    },
+    '/organizations/{organizationId}/alerts/{alertId}/escalation': {
+      get: {
+        summary: 'Escalation plan and execution state for one alert',
+        description: 'Reports what was planned, what executed, which responder was resolved at execution time, what was sent or cancelled, and what is still pending. Reading this never re-resolves on-call state.',
+        responses: ok('AlertEscalationState')
+      }
+    },
     '/organizations/{organizationId}/alerts/{alertId}/incidents': {
       post: {
         summary: 'Create an incident from an alert (explicit human action)',
@@ -182,6 +216,24 @@ export const openapi = {
 
     '/organizations/{organizationId}/integrations': { get: { summary: 'List configured integrations without secrets' } },
     '/organizations/{organizationId}/integrations/discord': { put: { summary: 'Configure Discord webhook integration (OWNER/ADMIN). The webhook secret is never returned by any read.' } },
+    '/organizations/{organizationId}/integrations/slack': {
+      put: {
+        summary: 'Configure Slack paging with an Incoming Webhook URL (OWNER/ADMIN)',
+        description: 'Only https://hooks.slack.com/services/... URLs are accepted, and the stored URL is never returned by any read. Slack bots, slash commands and interactive incident management are deliberately not implemented.',
+        requestBody: json(ref('SlackIntegrationInput')),
+        responses: ok('Stored integration without its secret')
+      },
+      delete: { summary: 'Remove the Slack integration (OWNER/ADMIN); queued pages then fail closed rather than being misrouted', responses: ok('Removal result') }
+    },
+    '/organizations/{organizationId}/integrations/smtp': {
+      put: {
+        summary: 'Configure responder email paging over SMTP (OWNER/ADMIN)',
+        description: 'The password is stored encrypted and is never returned or logged; reads report only whether a credential is configured. A responder is only ever emailed at their own Relay account address.',
+        requestBody: json(ref('SmtpIntegrationInput')),
+        responses: ok('Stored integration without its secret')
+      },
+      delete: { summary: 'Remove the SMTP integration (OWNER/ADMIN)', responses: ok('Removal result') }
+    },
     '/organizations/{organizationId}/events': { get: { summary: 'SSE stream for organization refresh events (incidents, alert routing, acknowledgement, on-call)' } },
     '/alerts': {
       post: {
@@ -201,6 +253,10 @@ export const openapi = {
       alertKey: { type: 'apiKey', in: 'header', name: 'x-relay-alert-key' }
     },
     schemas: {
+      EscalationPolicyInput: {
+        type: 'object', required: ['name','steps'],
+        properties: { name: { type: 'string', minLength: 2, maxLength: 120 }, description: { type: 'string', maxLength: 2000 }, enabled: { type: 'boolean' }, steps: { type: 'array', maxItems: 32, items: { type: 'object', required: ['position','afterMinutes','targetScheduleId','channels'], properties: { position: { type: 'integer', minimum: 0 }, afterMinutes: { type: 'integer', minimum: 1, description: 'Offset from initial routing time, not the previous step.' }, targetScheduleId: { type: 'string' }, channels: { type: 'array', minItems: 1, items: { type: 'string', enum: ['DISCORD','SLACK','EMAIL'] } } } } } }
+      },
       AlertIntake: {
         type: 'object',
         required: ['organizationSlug', 'source', 'title', 'severity'],
@@ -281,6 +337,103 @@ export const openapi = {
           reason: { type: 'string', maxLength: 500 }
         }
       },
+      NotificationDelivery: {
+        type: 'object',
+        description: 'One durable page: the persisted intent to notify one responder over one channel. Created when routing decides to notify or when an escalation step executes.',
+        required: ['id', 'provider', 'status', 'attemptCount'],
+        properties: {
+          id: { type: 'string' },
+          alertId: { type: 'string' },
+          routingId: { type: ['string', 'null'] },
+          escalationJobId: { type: ['string', 'null'], description: 'Null for the immediate page; set when the page came from an escalation step.' },
+          provider: { type: 'string', enum: ['DISCORD', 'SLACK', 'EMAIL'] },
+          status: { type: 'string', enum: ['PENDING', 'IN_FLIGHT', 'RETRYING', 'SENT', 'FAILED', 'CANCELLED'] },
+          statusLabel: { type: 'string', description: 'Operator-readable label; the UI never depends on a raw status token.' },
+          responderUserId: { type: ['string', 'null'] },
+          responderDisplayName: { type: ['string', 'null'], description: 'Snapshot taken at enqueue time so a later rename never rewrites history.' },
+          attemptCount: { type: 'integer', minimum: 0, maximum: 3 },
+          nextAttemptAt: { type: ['string', 'null'], format: 'date-time' },
+          scheduledAt: { type: ['string', 'null'], format: 'date-time' },
+          completedAt: { type: ['string', 'null'], format: 'date-time' },
+          lastError: { type: ['string', 'null'], description: 'Operator-readable failure reason. Never contains a webhook URL, token or password.' },
+          destination: { type: 'object', description: 'Non-secret description of where the page went (webhook name, integration name, recipient address).' },
+          attempts: { type: 'array', items: { $ref: '#/components/schemas/DeliveryAttempt' } }
+        }
+      },
+      DeliveryAttempt: {
+        type: 'object',
+        description: 'An immutable record of one provider call or one skipped attempt.',
+        required: ['attemptNumber', 'outcome'],
+        properties: {
+          id: { type: 'string' },
+          attemptNumber: { type: 'integer', minimum: 1, maximum: 3 },
+          outcome: { type: 'string', enum: ['SENT', 'RETRYABLE_FAILURE', 'PERMANENT_FAILURE'] },
+          providerStatusCode: { type: ['integer', 'null'] },
+          safeError: { type: ['string', 'null'] },
+          startedAt: { type: ['string', 'null'], format: 'date-time' },
+          completedAt: { type: ['string', 'null'], format: 'date-time' },
+          manualRetryByUserId: { type: ['string', 'null'], description: 'Set when the attempt was requested by a person through the retry endpoint.' }
+        }
+      },
+      AlertEscalationState: {
+        type: 'object',
+        description: 'Read model over the persisted escalation jobs and deliveries of one alert.',
+        properties: {
+          policyId: { type: ['string', 'null'] },
+          policyName: { type: ['string', 'null'] },
+          planned: { type: 'integer' },
+          executed: { type: 'integer' },
+          cancelled: { type: 'integer' },
+          unresolved: { type: 'integer', description: 'Steps that executed but resolved no responder; never silently retried into a page for the wrong person.' },
+          nextDueAt: { type: ['string', 'null'], format: 'date-time' },
+          due: { type: 'boolean' },
+          immediateDeliveries: { type: 'array', items: { $ref: '#/components/schemas/NotificationDelivery' } },
+          steps: { type: 'array', items: { $ref: '#/components/schemas/EscalationStepState' } }
+        }
+      },
+      EscalationStepState: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          position: { type: 'integer' },
+          afterMinutes: { type: 'integer' },
+          dueAt: { type: 'string', format: 'date-time' },
+          targetScheduleId: { type: ['string', 'null'] },
+          targetScheduleName: { type: ['string', 'null'] },
+          channels: { type: 'array', items: { type: 'string' } },
+          state: { type: 'string', enum: ['PENDING', 'IN_FLIGHT', 'COMPLETED', 'FAILED', 'CANCELLED_ACKNOWLEDGED'] },
+          stateLabel: { type: 'string' },
+          resolvedResponder: { type: ['object', 'null'], properties: { userId: { type: 'string' }, displayName: { type: ['string', 'null'] } } },
+          outcome: { type: 'object' },
+          deliveries: { type: 'array', items: { $ref: '#/components/schemas/NotificationDelivery' } }
+        }
+      },
+      SlackIntegrationInput: {
+        type: 'object',
+        required: ['webhookUrl'],
+        properties: {
+          name: { type: 'string', maxLength: 80 },
+          webhookUrl: { type: 'string', description: 'Must be an https://hooks.slack.com/services/... Incoming Webhook URL; anything else is rejected before storage.' },
+          enabled: { type: 'boolean', default: true }
+        }
+      },
+      SmtpIntegrationInput: {
+        type: 'object',
+        required: ['host', 'port'],
+        properties: {
+          name: { type: 'string', maxLength: 80 },
+          host: { type: 'string', maxLength: 253 },
+          port: { type: 'integer', minimum: 1, maximum: 65535 },
+          secure: { type: 'boolean', description: 'Implicit TLS. Rejected for ports 25 and 587, which are STARTTLS ports.' },
+          username: { type: ['string', 'null'], maxLength: 320 },
+          password: { type: 'string', maxLength: 500, description: 'Write-only. Never returned by any read; omit or set keepExistingPassword to retain the stored credential.' },
+          keepExistingPassword: { type: 'boolean', description: 'Edit support: keep the stored password instead of supplying a new one.' },
+          fromEmail: { type: 'string', description: 'Defaults to the configured username when it is an address.' },
+          fromName: { type: 'string', maxLength: 120 },
+          enabled: { type: 'boolean', default: true },
+          timeoutMs: { type: 'integer', minimum: 1000, maximum: 120000, default: 10000 }
+        }
+      },
       RoutingRuleInput: {
         type: 'object',
         required: ['name', 'targetScheduleId'],
@@ -292,7 +445,9 @@ export const openapi = {
           matchSource: { type: ['string', 'null'], description: 'Exact match after trimming and case-folding. Null matches any source.' },
           matchSeverities: { type: 'array', items: { type: 'string' }, description: 'Empty array matches any severity.' },
           targetKind: { type: 'string', enum: ['ONCALL_SCHEDULE'], default: 'ONCALL_SCHEDULE' },
-          targetScheduleId: { type: 'string' }
+          targetScheduleId: { type: 'string' },
+          notificationChannels: { type: 'array', items: { type: 'string', enum: ['DISCORD','SLACK','EMAIL'] }, default: ['DISCORD'] },
+          escalationPolicyId: { type: ['string','null'], description: 'Optional organization-scoped escalation policy.' }
         }
       }
     }

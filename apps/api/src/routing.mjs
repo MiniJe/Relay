@@ -2,15 +2,18 @@
 //
 //   receive → validate → persist/idempotency → evaluate routing rules
 //           → resolve schedule → resolve current on-call responder
-//           → persist routing result → attempt notification
+//           → persist routing result → materialize escalation plan
+//           → persist logical delivery tasks → (optionally) kick the worker
 //
-// Durability rule: the alert is already committed before any of this runs. A
-// routing failure or a Discord outage can never roll back the alert; both are
-// recorded as warnings and as state on the routing audit record.
+// Durability rule: the alert is already committed before any of this runs, and
+// the page is durable before any provider is contacted. A routing failure, a
+// worker crash or a Discord/Slack/SMTP outage can never roll back the alert or
+// lose the page; both are recorded as warnings and as persisted state.
 
 import { domainError } from '../../../packages/shared/domain.mjs';
 import { resolveOnCall, selectRoutingRule, upcomingHandoffs } from '../../../packages/shared/oncall.mjs';
-import { sendDiscordAlertNotification } from './discord.mjs';
+import { NOTIFICATION_CHANNELS, materializeEscalationPlan } from '../../../packages/shared/escalation.mjs';
+import { loadIntegrationFor, normalizeChannels, destinationSnapshot } from './delivery.mjs';
 
 /**
  * Pure-ish rule evaluation: reads the organization's rules and the target
@@ -23,12 +26,14 @@ export async function evaluateAlertRouting({ store, organizationId, alert, at })
     return {
       resolution: 'NO_MATCHING_RULE', ruleId: null, ruleName: null, scheduleId: null, scheduleName: null,
       teamId: null, teamName: null, oncallUserId: null, oncallDisplayName: null, responderSource: null,
+      notificationChannels: [], escalationPolicyId: null,
       overrideId: null, periodStartsAt: null, periodEndsAt: null, timeZone: null
     };
   }
   const schedule = await store.getSchedule(organizationId, rule.targetScheduleId);
   const base = {
     ruleId: rule.id, ruleName: rule.name,
+    notificationChannels: rule.notificationChannels ?? ['DISCORD'], escalationPolicyId: rule.escalationPolicyId ?? null,
     scheduleId: schedule?.id ?? rule.targetScheduleId, scheduleName: schedule?.name ?? null,
     teamId: schedule?.teamId ?? null, teamName: schedule?.teamName ?? null,
     timeZone: schedule?.timeZone ?? 'UTC'
@@ -50,44 +55,94 @@ export async function evaluateAlertRouting({ store, organizationId, alert, at })
 }
 
 /**
- * Attempt the first notification channel. Returns a status rather than
- * throwing so the caller can persist the outcome next to the durable alert.
+ * Immediate (non-escalation) delivery intent for one routed alert.
+ *
+ * One logical delivery per configured channel. The responder identity, their
+ * display name and the resolved destination are snapshotted here so a later
+ * rotation change, integration edit or responder rename cannot retarget a page
+ * that was already created.
  */
-export async function deliverAlertNotification({ store, config, organizationId, alert, decision, fetchImpl = fetch, logger = console }) {
-  if (!decision.oncallUserId) return { status: 'SKIPPED_NO_RESPONDER', provider: null };
-  const integration = await store.getIntegration(organizationId, 'DISCORD');
-  if (!integration) return { status: 'SKIPPED_NO_INTEGRATION', provider: 'DISCORD' };
-  if (!integration.enabled) return { status: 'SKIPPED_DISABLED', provider: 'DISCORD' };
-
-  const [identity, service] = await Promise.all([
-    store.getDiscordIdentity(organizationId, decision.oncallUserId),
-    alert.serviceId ? store.getService(organizationId, alert.serviceId) : Promise.resolve(undefined)
+export async function buildImmediateDeliveries({ store, organizationId, alert, decision, routingId, at }) {
+  if (!decision.oncallUserId) return [];
+  const channels = normalizeChannels(decision.notificationChannels ?? ['DISCORD']);
+  const [responderUser, service, discordIdentity] = await Promise.all([
+    store.getUserById(decision.oncallUserId),
+    alert.serviceId ? store.getService(organizationId, alert.serviceId) : Promise.resolve(undefined),
+    store.getDiscordIdentity(organizationId, decision.oncallUserId)
   ]);
-  const discordUserId = identity?.discordUserId ?? null;
-  try {
-    await sendDiscordAlertNotification({
-      integration,
-      encryptionKey: config.integrationEncryptionKey,
-      alert,
-      routing: decision,
-      service,
-      mentionDiscordUserId: discordUserId,
-      timeZone: decision.timeZone ?? 'UTC',
-      fetchImpl
+  const records = [];
+  for (const provider of channels) {
+    const { integration } = await loadIntegrationFor({ store, organizationId, provider });
+    records.push({
+      organizationId,
+      alertId: alert.id,
+      routingId,
+      escalationJobId: null,
+      provider,
+      responderUserId: decision.oncallUserId,
+      responderNameSnapshot: decision.oncallDisplayName ?? responderUser?.displayName ?? null,
+      scheduledAt: at,
+      nextAttemptAt: at,
+      status: 'PENDING',
+      attemptCount: 0,
+      destinationSnapshot: {
+        ...destinationSnapshot({
+          provider, integration, responder: responderUser,
+          extra: { discordUserId: provider === 'DISCORD' ? discordIdentity?.discordUserId ?? null : null, timeZone: decision.timeZone ?? 'UTC' }
+        }),
+        serviceName: service?.name ?? null
+      }
     });
-    return { status: 'SENT', provider: 'DISCORD', discordUserId };
-  } catch (error) {
-    // Log the message only: the webhook URL and its token are secrets.
-    logger.warn?.('Alert notification delivery failed:', error.message);
-    return { status: 'FAILED', provider: 'DISCORD', discordUserId, error: error.message };
   }
+  return records;
+}
+
+/**
+ * Deliver one routed alert through the durable outbox and, when a worker is
+ * available, drain it once so paging latency stays comparable to a direct call.
+ * Returns the M-001 shaped status summary. A configured channel that this build
+ * cannot serve is refused outright rather than misrouted to another provider.
+ */
+export async function deliverAlertNotification({ store, config, organizationId, alert, decision, routingId, fetchImpl = fetch, logger = console, worker = null, at = new Date().toISOString() }) {
+  if (!decision.oncallUserId) return { status: 'SKIPPED_NO_RESPONDER', provider: null };
+  const channels = decision.notificationChannels ?? ['DISCORD'];
+  const unsupported = channels.filter((channel) => !NOTIFICATION_CHANNELS.includes(channel));
+  if (unsupported.length) {
+    // Fail closed: never silently route a configured channel through a provider
+    // the operator did not ask for.
+    return { status: 'FAILED', provider: channels.join(','), error: 'One or more configured notification channels are not supported by this build.' };
+  }
+  if (!store.enqueueDeliveries) {
+    // A store without the durable outbox can only report what it knows.
+    const [channel] = normalizeChannels(channels);
+    const { integration } = await loadIntegrationFor({ store, organizationId, provider: channel });
+    if (!integration) return { status: 'SKIPPED_NO_INTEGRATION', provider: channel };
+    if (!integration.enabled) return { status: 'SKIPPED_DISABLED', provider: channel };
+    return { status: 'NOT_ATTEMPTED', provider: channel };
+  }
+  const records = await buildImmediateDeliveries({ store, organizationId, alert, decision, routingId, at });
+  await store.enqueueDeliveries(records);
+  // Low-latency kick: the page is already durable, so a crash here (or in the
+  // provider call below) loses nothing — the polling loop or the next process
+  // start will pick the same row back up.
+  if (worker) await worker.kick(new Date(at), { alertId: alert.id });
+  const deliveries = await store.listAlertDeliveries(organizationId, alert.id);
+  // The worker owns the M-001 summary now; this result only shapes the response.
+  const failedAttempt = deliveries.find((delivery) => delivery.attemptCount > 0 && ['FAILED', 'RETRYING'].includes(delivery.status));
+  const sent = deliveries.find((delivery) => delivery.status === 'SENT');
+  const providerLabel = failedAttempt?.provider ?? sent?.provider ?? deliveries[0]?.provider ?? channels[0];
+  if (failedAttempt) {
+    return { status: 'FAILED', provider: providerLabel, error: failedAttempt.lastError ?? 'Delivery failed.', workerOwned: true };
+  }
+  if (sent) return { status: 'SENT', provider: providerLabel, discordUserId: sent.destinationSnapshot?.discordUserId ?? null, workerOwned: true };
+  return { status: 'NOT_ATTEMPTED', provider: providerLabel, workerOwned: true };
 }
 
 /**
  * Full routing pass for one newly-ingested alert. Never throws for delivery or
  * evaluation problems; those surface as warnings plus persisted state.
  */
-export async function routeAlert({ store, config, organizationId, alert, at = new Date().toISOString(), fetchImpl = fetch, logger = console, notify = true }) {
+export async function routeAlert({ store, config, organizationId, alert, at = new Date().toISOString(), fetchImpl = fetch, logger = console, notify = true, worker = null }) {
   const warnings = [];
   let decision;
   try {
@@ -101,15 +156,41 @@ export async function routeAlert({ store, config, organizationId, alert, at = ne
 
   const routing = await store.recordAlertRouting(organizationId, alert.id, decision);
 
+  // Materialize future work only after the durable alert/routing record exists.
+  // The persisted plan snapshots policy and schedule names so later edits do
+  // not alter the meaning of an already-routed alert.
+  if (decision.resolution === 'ROUTED' && decision.ruleId && store.materializeEscalationJobs) {
+    try {
+      const rule = await store.getRoutingRule(organizationId, decision.ruleId);
+      const policy = rule?.escalationPolicyId ? await store.getEscalationPolicy(organizationId, rule.escalationPolicyId) : null;
+      if (policy?.enabled) {
+        const schedulesById = {};
+        for (const step of policy.steps ?? []) {
+          if (!schedulesById[step.targetScheduleId]) schedulesById[step.targetScheduleId] = await store.getSchedule(organizationId, step.targetScheduleId);
+        }
+        const plan = materializeEscalationPlan({ organizationId, alertId: alert.id, routingId: routing.id, routedAt: at, policy, steps: policy.steps ?? [], schedulesById });
+        await store.materializeEscalationJobs(plan);
+      }
+    } catch (error) {
+      logger.error?.('Escalation plan persistence failed:', error.message);
+      warnings.push({ code: 'ESCALATION_PLAN_FAILED', message: 'The alert remains stored, but its escalation plan could not be persisted.' });
+    }
+  }
+
   if (notify) {
-    const delivery = await deliverAlertNotification({ store, config, organizationId, alert, decision, fetchImpl, logger });
-    await store.recordRoutingNotification(organizationId, alert.id, {
-      status: delivery.status,
-      provider: delivery.provider,
-      error: delivery.error,
-      notifiedAt: delivery.status === 'SENT' ? new Date().toISOString() : null,
-      discordUserId: delivery.discordUserId ?? null
-    });
+    const delivery = await deliverAlertNotification({ store, config, organizationId, alert, decision, routingId: routing?.id ?? null, at, fetchImpl, logger, worker });
+    // The durable worker already recorded the outcome on the routing record.
+    // Only the non-outbox fallback needs this write, so a later worker pass can
+    // never be clobbered by an older summary.
+    if (!delivery.workerOwned) {
+      await store.recordRoutingNotification(organizationId, alert.id, {
+        status: delivery.status,
+        provider: delivery.provider,
+        error: delivery.error,
+        notifiedAt: delivery.status === 'SENT' ? new Date().toISOString() : null,
+        discordUserId: delivery.discordUserId ?? null
+      });
+    }
     if (delivery.status === 'FAILED') warnings.push({ code: 'ALERT_NOTIFICATION_FAILED', message: 'The alert was routed but the notification could not be delivered.' });
   }
 

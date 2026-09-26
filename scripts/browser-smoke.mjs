@@ -591,16 +591,18 @@ async function main() {
       check('on-call state reports the schedule IANA timezone', provisioned02.timeZone === 'Europe/Bucharest', String(provisioned02.timeZone));
 
       let routedAlertTitle = '';
+      let ingestedAlertId = null;
       if (alertKey && provisioned02.orgSlug) {
         routedAlertTitle = `Smoke routed alert ${marker}`;
         const ingested = await page.evaluate(`(async () => {
           const body = { organizationSlug: ${JSON.stringify(provisioned02.orgSlug)}, source: 'browser-smoke', externalId: 'smoke-${marker}', title: ${JSON.stringify(routedAlertTitle)}, description: 'browser smoke routing', severity: 'critical' };
           const r = await fetch('/api/v1/alerts', { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-alert-key': ${JSON.stringify(alertKey)} }, body: JSON.stringify(body) });
           const j = await r.json().catch(() => ({}));
-          return { status: r.status, resolution: j?.data?.routing?.resolution ?? null, responder: j?.data?.routing?.oncallDisplayName ?? null, team: j?.data?.routing?.teamName ?? null, keyEchoed: JSON.stringify(j).includes(${JSON.stringify(alertKey)}) };
+          return { status: r.status, id: j?.data?.id ?? null, resolution: j?.data?.routing?.resolution ?? null, responder: j?.data?.routing?.oncallDisplayName ?? null, team: j?.data?.routing?.teamName ?? null, keyEchoed: JSON.stringify(j).includes(${JSON.stringify(alertKey)}) };
         })()`);
         check('alert ingested through the keyed endpoint is routed to the on-call responder', ingested.status === 202 && ingested.resolution === 'ROUTED' && ingested.responder === provisioned02.displayName, JSON.stringify(ingested));
         check('the routing response never echoes the ingest key', ingested.keyEchoed === false);
+        ingestedAlertId = ingested.id;
       } else {
         console.log('      note: ALERT_INGEST_KEY unavailable, so the routed-alert table pass is skipped');
       }
@@ -676,11 +678,19 @@ async function main() {
           listsRule: document.querySelector('.content').textContent.includes('Smoke criticals ${marker}'),
           rowCount: rows.length,
           firstRowPriority: (rows[0]?.textContent ?? '').trim().slice(0, 40),
-          form: ['rule-name', 'rule-priority', 'rule-service', 'rule-source', 'rule-severities', 'rule-target'].every((id) => !!document.getElementById(id))
+          form: ['rule-name', 'rule-priority', 'rule-service', 'rule-source', 'rule-severities', 'rule-target'].every((id) => !!document.getElementById(id)),
+          channels: !!document.querySelector('#notification-channels input[name=channel]'),
+          channelValues: [...document.querySelectorAll('#notification-channels input[name=channel]')].map((input) => input.value),
+          policySelect: !!document.querySelector('#rule-policy'),
+          policyEditor: !!document.querySelector('#policy-form'),
+          mentionsSkippedNotRerouted: document.querySelector('.content').textContent.includes('never silently rerouted')
         };
       })()`);
       check('routing view lists configured rules', routingView.listsRule === true, JSON.stringify(routingView));
       check('routing rule form exposes name, priority, conditions and target', routingView.form === true);
+      check('routing rule form exposes Discord, Slack and Email channels plus an escalation policy', routingView.channels === true && ['DISCORD', 'SLACK', 'EMAIL'].every((c) => routingView.channelValues.includes(c)) && routingView.policySelect === true, JSON.stringify(routingView.channelValues));
+      check('routing view offers an ordered escalation policy editor', routingView.policyEditor === true);
+      check('routing view states that an unconfigured channel fails closed rather than being rerouted', routingView.mentionsSkippedNotRerouted === true);
       const routingProblems = page.problems(page.take());
       check('routing view free of console/exception/MIME/request failures', routingProblems.length === 0, routingProblems.join(' | '));
 
@@ -714,15 +724,85 @@ async function main() {
       const alertsShot = await page.screenshot('alerts-desktop');
       if (alertsShot) console.log(`      screenshot: ${alertsShot}`);
 
+      // ---- Relay 0.2 / M-002: durable delivery and escalation surfaces ------
+      if (ingestedAlertId) {
+        await page.goto(`${baseUrl}/app/alerts/${ingestedAlertId}`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.summary-strip')` });
+        const detail = await page.evaluate(`(() => {
+          const text = document.querySelector('.content').textContent;
+          const strip = [...document.querySelectorAll('.summary-strip .summary-label')].map((e) => e.textContent.trim());
+          const labels = [...document.querySelectorAll('.badge')].map((e) => e.textContent.trim());
+          return {
+            heading: (document.querySelector('.content h1')?.textContent ?? '').trim(),
+            strip,
+            deliveryRows: document.querySelectorAll('[data-delivery]').length,
+            deliveryLabels: labels.filter((l) => ['Sent', 'Delivery failed', 'Retry scheduled', 'Queued', 'Sending', 'Cancelled'].includes(l)),
+            hasEscalationSection: text.includes('Escalation plan'),
+            rawStatusTokens: ['RETRYING', 'SKIPPED_NO_INTEGRATION', 'NOT_ATTEMPTED', 'IN_FLIGHT', 'PENDING'].filter((t) => text.includes(t)),
+            retryAction: !!document.querySelector('[data-delivery-retry]'),
+            attemptTrail: !!document.querySelector('.attempt-list'),
+            backLink: !!document.querySelector('a[href="/app/alerts"]')
+          };
+        })()`);
+        check('alert detail renders its routing, delivery and escalation summary', detail.heading.length > 0 && detail.strip.length === 4 && detail.strip.includes('Deliveries') && detail.strip.includes('Escalation'), JSON.stringify(detail.strip));
+        check('alert detail lists a durable delivery row per channel', detail.deliveryRows >= 1, String(detail.deliveryRows));
+        check('alert detail shows delivery state as a readable label, never a raw token', detail.deliveryLabels.length >= 1 && detail.rawStatusTokens.length === 0, JSON.stringify({ labels: detail.deliveryLabels, raw: detail.rawStatusTokens }));
+        check('alert detail exposes the escalation plan section', detail.hasEscalationSection === true);
+        check('alert detail links back to the alerts table', detail.backLink === true);
+        if (!detail.deliveryLabels.includes('Sent')) {
+          check('alert detail offers a manual retry for a page that was not delivered', detail.retryAction === true);
+        }
+        const detailProblems = page.problems(page.take());
+        check('alert detail free of console/exception/MIME/request failures', detailProblems.length === 0, detailProblems.join(' | '));
+      } else {
+        console.log('      note: no ingested alert id, so the alert-detail pass is skipped');
+      }
+
+      await page.goto(`${baseUrl}/app/escalations`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.summary-strip')` });
+      const escalationView = await page.evaluate(`(() => {
+        const text = document.querySelector('.content').textContent;
+        const strip = [...document.querySelectorAll('.summary-strip .summary-label')].map((e) => e.textContent.trim());
+        return {
+          heading: (document.querySelector('.content h1')?.textContent ?? '').trim(),
+          strip,
+          statesPersisted: text.includes('never re-resolves'),
+          hasTables: document.querySelectorAll('.table-wrap').length >= 1,
+          stepRows: document.querySelectorAll('[data-escalation-step]').length
+        };
+      })()`);
+      check('escalations view reports scheduled, executed, cancelled and unresolved steps', escalationView.strip.length === 4 && ['Scheduled', 'Executed', 'Cancelled', 'Unresolved'].every((label) => escalationView.strip.includes(label)), JSON.stringify(escalationView.strip));
+      check('escalations view states that reading it never re-resolves on-call state', escalationView.statesPersisted === true);
+      check('escalations view renders its tables', escalationView.hasTables === true);
+      const escalationProblems = page.problems(page.take());
+      check('escalations view free of console/exception/MIME/request failures', escalationProblems.length === 0, escalationProblems.join(' | '));
+
+      await page.goto(`${baseUrl}/app/settings`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('[data-integration-slack]')` });
+      const integrationsView = await page.evaluate(`(() => {
+        const text = document.querySelector('.content').textContent;
+        return {
+          slackSection: !!document.querySelector('[data-integration-slack]'),
+          slackForm: !!document.querySelector('#slack-form') && !!document.querySelector('#slack-url'),
+          smtpSection: !!document.querySelector('[data-integration-smtp]'),
+          smtpForm: !!document.querySelector('#smtp-form') && !!document.querySelector('#smtp-host') && !!document.querySelector('#smtp-port') && !!document.querySelector('#smtp-user'),
+          smtpPasswordBlank: (document.querySelector('#smtp-password')?.value ?? '') === '',
+          mentionsIncomingWebhookOnly: text.includes('hooks.slack.com'),
+          mentionsRecipientIsAccount: text.includes('own Relay account address')
+        };
+      })()`);
+      check('settings exposes a Slack Incoming Webhook section', integrationsView.slackSection === true && integrationsView.slackForm === true && integrationsView.mentionsIncomingWebhookOnly === true);
+      check('settings exposes an SMTP section with a blank password field', integrationsView.smtpSection === true && integrationsView.smtpForm === true && integrationsView.smtpPasswordBlank === true);
+      check('settings states that a responder is only ever emailed at their own account address', integrationsView.mentionsRecipientIsAccount === true);
+      const integrationProblems = page.problems(page.take());
+      check('settings free of console/exception/MIME/request failures', integrationProblems.length === 0, integrationProblems.join(' | '));
+
       // The sidebar must expose every 0.2 surface by name, not by icon alone.
       const nav = await page.evaluate(`[...document.querySelectorAll('.sidebar .nav a')].map((a) => ({ href: a.getAttribute('href'), label: a.textContent.trim() }))`);
       const navLabels = nav.map((n) => n.label.replace(/^[^A-Za-z]*/, ''));
-      for (const [href, label] of [['/app/alerts', 'Alerts'], ['/app/oncall', 'On-call'], ['/app/teams', 'Teams'], ['/app/routing', 'Routing']]) {
+      for (const [href, label] of [['/app/alerts', 'Alerts'], ['/app/escalations', 'Escalations'], ['/app/oncall', 'On-call'], ['/app/teams', 'Teams'], ['/app/routing', 'Routing']]) {
         check(`sidebar exposes ${label} at ${href}`, nav.some((n) => n.href === href && n.label.includes(label)), JSON.stringify(navLabels));
       }
 
       // Deep links to the new routes must survive a full page load.
-      for (const route of ['/app/alerts', '/app/oncall', '/app/teams', '/app/routing']) {
+      for (const route of ['/app/alerts', '/app/escalations', '/app/oncall', '/app/teams', '/app/routing']) {
         await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.content h1')` });
         const deep = await page.evaluate(`({ path: location.pathname, heading: (document.querySelector('.content h1')?.textContent ?? '').trim(), active: document.querySelector('.sidebar .nav a.active')?.getAttribute('href') ?? null })`);
         check(`deep link ${route} renders its own view`, deep.path === route && deep.heading.length > 0 && deep.active === route, JSON.stringify(deep));
@@ -734,7 +814,7 @@ async function main() {
         await page.setViewport(viewport);
         await page.waitForCondition(`document.documentElement.clientWidth <= ${viewport.width}`);
         await page.goto(`${baseUrl}/app`, { waitFor: `!!document.querySelector('.app-shell')` });
-        for (const route of ['/app', '/app/alerts', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages']) {
+        for (const route of ['/app', '/app/alerts', '/app/escalations', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages']) {
           if (route !== '/app') await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell')` });
           const measured = await page.evaluate(`(() => {
             const cw = document.documentElement.clientWidth;
@@ -774,7 +854,7 @@ async function main() {
       for (const failure of failures) console.log(`  - ${failure}`);
       process.exitCode = 1;
     } else {
-      console.log('Browser smoke passed: boot, MIME, routing, keyboard, dialog, publication review, alert routing/on-call surfaces, responsive and reduced-motion contracts verified.');
+      console.log('Browser smoke passed: boot, MIME, routing, keyboard, dialog, publication review, alert routing, durable delivery, escalation, integration, responsive and reduced-motion contracts verified.');
     }
   } finally {
     cdp.close();

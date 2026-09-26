@@ -126,6 +126,14 @@ export async function sendDiscordAlertNotification({ integration, encryptionKey,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(5000)
   });
-  if (!response.ok) throw new Error(`Discord webhook returned HTTP ${response.status}.`);
+  if (!response.ok) {
+    // Attach the status so the durable-delivery worker can classify the
+    // failure the same way it classifies Slack and SMTP results.
+    const error = new Error(`Discord webhook returned HTTP ${response.status}.`);
+    error.status = response.status;
+    error.retryable = response.status === 429 || response.status >= 500;
+    error.permanent = response.status >= 400 && response.status < 500 && response.status !== 429 && response.status !== 408;
+    throw error;
+  }
   return { skipped: false, status: response.status, mentioned: Boolean(mentionDiscordUserId) };
 }

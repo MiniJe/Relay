@@ -160,3 +160,12 @@ See:
 ## License
 
 MIT.
+
+### Escalation policy work (M-002 partial)
+
+Relay 0.2 M-002 adds organization-scoped escalation policy configuration,
+rule-level channel/policy references, deterministic schedule snapshots and the
+forward-only migration `003_escalation_delivery.sql`. Durable dispatch/retry
+workers and Slack/SMTP delivery are still under implementation and not yet
+production-qualified; consult [docs/ESCALATION.md](docs/ESCALATION.md) before
+planning a deployment around escalation paging.

@@ -205,3 +205,12 @@ serialized public payload.
 
 These are disclosed limitations, not authorization to implement future enterprise
 identity, escalation or autonomous-paging scope.
+
+## Escalation configuration boundary
+
+Escalation policies and steps are organization scoped. Policy references and
+schedule references are tenant constrained in migration 003; API configuration
+is OWNER/ADMIN only. Jobs retain only snapshotted operational identifiers and
+names. Public status handlers do not read these tables. M-002's Slack and SMTP
+secret-storage/provider boundaries are not complete yet; do not configure
+unsupported channels or treat the present schema as production ready.

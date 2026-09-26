@@ -164,3 +164,12 @@ memory would fail the run.
 4. Run `npm run verify`.
 5. If persistence changed, test `npm run migrate` against a clean PostgreSQL database.
 6. Review tenant boundaries and public-data filtering before merge.
+
+## Escalation development status
+
+`npm test` includes deterministic domain tests for ordered policy steps,
+route-relative due times, snapshot behavior, acknowledgement cancellation and
+bounded retry calculation. PostgreSQL qualification for migration 003 requires
+a real `DATABASE_URL`; this checkout has no database configured. The current
+M-002 implementation remains partial, and worker restart/production/browser
+qualification is not available yet. See [ESCALATION.md](ESCALATION.md).

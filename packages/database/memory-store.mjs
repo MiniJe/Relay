@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { domainError } from '../shared/domain.mjs';
+import { validateEscalationSteps } from '../shared/escalation.mjs';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -25,6 +26,11 @@ export class MemoryStore {
     this.postmortems = [];
     this.alerts = [];
     this.integrations = [];
+    this.escalationPolicies = [];
+    this.escalationPolicySteps = [];
+    this.escalationJobs = [];
+    this.notificationDeliveries = [];
+    this.notificationAttempts = [];
     this.teams = [];
     this.teamMembers = [];
     this.schedules = [];
@@ -318,7 +324,18 @@ export class MemoryStore {
     const routing = this.alertRoutings.find((r) => r.organizationId === organizationId && r.alertId === alertId);
     if (!routing) return undefined;
     if (routing.acknowledgedAt) return { routing: this.#routingRecord(routing), alreadyAcknowledged: true };
-    Object.assign(routing, { acknowledgedAt: now(), acknowledgedByUserId: userId, acknowledgedByDisplayName: displayName ?? null, updatedAt: now() });
+    const acknowledgedAt=now();
+    Object.assign(routing, { acknowledgedAt, acknowledgedByUserId: userId, acknowledgedByDisplayName: displayName ?? null, updatedAt: acknowledgedAt });
+    this.escalationJobs=this.escalationJobs.map((job)=>job.organizationId===organizationId&&job.alertId===alertId&&['PENDING','IN_FLIGHT'].includes(job.state)?{...job,state:'CANCELLED_ACKNOWLEDGED',updatedAt:acknowledgedAt}:job);
+    // Deliveries that were never attempted are still "future pages": once the
+    // alert is acknowledged they are cancelled. Anything that already reached a
+    // provider keeps its immutable attempt history and is left alone.
+    for(const delivery of this.notificationDeliveries){
+      if(delivery.organizationId!==organizationId||delivery.alertId!==alertId)continue;
+      if(['PENDING','RETRYING','IN_FLIGHT'].includes(delivery.status)&&delivery.attemptCount===0){
+        Object.assign(delivery,{status:'CANCELLED',completedAt:acknowledgedAt,nextAttemptAt:acknowledgedAt,leaseOwner:null,leaseExpiresAt:null,updatedAt:acknowledgedAt});
+      }
+    }
     return { routing: this.#routingRecord(routing), alreadyAcknowledged: false };
   }
   async linkRoutingIncident(organizationId, alertId, incidentId) {
@@ -488,12 +505,13 @@ export class MemoryStore {
     const schedule = this.schedules.find((s) => s.organizationId === organizationId && s.id === input.targetScheduleId);
     if (!schedule) throw domainError('INVALID_REFERENCE', 'The routing target schedule must belong to the same organization.', 400);
     if (input.matchServiceId && !this.services.some((s) => s.organizationId === organizationId && s.id === input.matchServiceId)) throw domainError('INVALID_REFERENCE', 'The matched service must belong to the same organization.', 400);
+    if (input.escalationPolicyId && !this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.id===input.escalationPolicyId)) throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
     const at = now();
     const rule = {
       id: uid(), organizationId, name: input.name, enabled: input.enabled !== false, priority: input.priority,
       matchServiceId: input.matchServiceId ?? null, matchSource: input.matchSource ?? null,
       matchSeverities: input.matchSeverities ?? [], targetKind: input.targetKind ?? 'ONCALL_SCHEDULE',
-      targetScheduleId: schedule.id, createdAt: at, updatedAt: at
+      targetScheduleId: schedule.id, notificationChannels: input.notificationChannels??['DISCORD'], escalationPolicyId: input.escalationPolicyId??null, createdAt: at, updatedAt: at
     };
     this.routingRules.push(rule);
     return this.#ruleView(rule);
@@ -515,11 +533,14 @@ export class MemoryStore {
     if (!this.schedules.some((s) => s.organizationId === organizationId && s.id === targetScheduleId)) throw domainError('INVALID_REFERENCE', 'The routing target schedule must belong to the same organization.', 400);
     const matchServiceId = 'matchServiceId' in patch ? (patch.matchServiceId ?? null) : rule.matchServiceId;
     if (matchServiceId && !this.services.some((s) => s.organizationId === organizationId && s.id === matchServiceId)) throw domainError('INVALID_REFERENCE', 'The matched service must belong to the same organization.', 400);
+    const escalationPolicyId='escalationPolicyId' in patch?(patch.escalationPolicyId??null):rule.escalationPolicyId;
+    if(escalationPolicyId&&!this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.id===escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
     Object.assign(rule, {
       name: patch.name ?? rule.name, enabled: patch.enabled === undefined ? rule.enabled : patch.enabled,
       priority: patch.priority ?? rule.priority, matchServiceId,
       matchSource: 'matchSource' in patch ? (patch.matchSource ?? null) : rule.matchSource,
-      matchSeverities: patch.matchSeverities ?? rule.matchSeverities, targetScheduleId, updatedAt: now()
+      matchSeverities: patch.matchSeverities ?? rule.matchSeverities, targetScheduleId,
+      notificationChannels:patch.notificationChannels??rule.notificationChannels??['DISCORD'], escalationPolicyId, updatedAt: now()
     });
     return this.#ruleView(rule);
   }
@@ -528,6 +549,34 @@ export class MemoryStore {
     this.routingRules = this.routingRules.filter((r) => !(r.organizationId === organizationId && r.id === ruleId));
     return this.routingRules.length < before;
   }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — organization-scoped escalation policies
+  // ---------------------------------------------------------------------
+  async listEscalationPolicies(organizationId) {
+    return this.escalationPolicies.filter((p)=>p.organizationId===organizationId).map((p)=>({...clone(p),steps:this.escalationPolicySteps.filter((s)=>s.policyId===p.id).sort((a,b)=>a.position-b.position).map(clone)}));
+  }
+  async getEscalationPolicy(organizationId,policyId) { return (await this.listEscalationPolicies(organizationId)).find((p)=>p.id===policyId); }
+  async saveEscalationPolicy(organizationId,input,policyId) {
+    const steps=validateEscalationSteps(input.steps??[]);
+    for(const step of steps) if(!this.schedules.some((s)=>s.organizationId===organizationId&&s.id===step.targetScheduleId)) throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);
+    let policy=policyId?this.escalationPolicies.find((p)=>p.organizationId===organizationId&&p.id===policyId):undefined;
+    if(policyId&&!policy)return undefined;
+    if(this.escalationPolicies.some((p)=>p.organizationId===organizationId&&p.name===input.name&&p.id!==policy?.id))throw domainError('CONFLICT','Escalation policy name already exists.',409);
+    if(policy)Object.assign(policy,{name:input.name,description:input.description??'',enabled:input.enabled!==false,updatedAt:now()});
+    else {policy={id:uid(),organizationId,name:input.name,description:input.description??'',enabled:input.enabled!==false,createdAt:now(),updatedAt:now()};this.escalationPolicies.push(policy);}
+    this.escalationPolicySteps=this.escalationPolicySteps.filter((s)=>s.policyId!==policy.id);
+    this.escalationPolicySteps.push(...steps.map((step)=>({...clone(step),id:uid(),organizationId,policyId:policy.id,createdAt:now()})));
+    return this.getEscalationPolicy(organizationId,policy.id);
+  }
+  async deleteEscalationPolicy(organizationId,policyId) {
+    const count=this.escalationPolicies.length;this.escalationPolicies=this.escalationPolicies.filter((p)=>!(p.organizationId===organizationId&&p.id===policyId));
+    if(this.escalationPolicies.length===count)return false;this.escalationPolicySteps=this.escalationPolicySteps.filter((s)=>s.policyId!==policyId);for(const rule of this.routingRules)if(rule.organizationId===organizationId&&rule.escalationPolicyId===policyId)rule.escalationPolicyId=null;return true;
+  }
+  async materializeEscalationJobs(plan) {
+    const inserted=[];for(const item of plan){if(this.escalationJobs.some((j)=>j.routingId===item.routingId&&j.stepPosition===item.stepPosition))continue;const job={id:uid(),...clone(item),createdAt:now(),updatedAt:now()};this.escalationJobs.push(job);inserted.push(clone(job));}return inserted;
+  }
+  async listEscalationJobs(organizationId,alertId) {return this.escalationJobs.filter((j)=>j.organizationId===organizationId&&j.alertId===alertId).sort((a,b)=>a.stepPosition-b.stepPosition).map(clone);}
 
   // ---------------------------------------------------------------------
   // Relay 0.2 — optional Discord responder mapping
@@ -551,12 +600,172 @@ export class MemoryStore {
     return this.discordIdentities.length < before;
   }
 
-  async upsertIntegration(organizationId, { provider, name, secretEncrypted, enabled }) {
+  async upsertIntegration(organizationId, { provider, name, secretEncrypted, config, enabled }) {
     let integration = this.integrations.find((x)=>x.organizationId===organizationId && x.provider===provider);
-    if (integration) Object.assign(integration, {name,secretEncrypted,enabled,updatedAt:now()});
-    else { integration={id:uid(),organizationId,provider,name,secretEncrypted,enabled,createdAt:now(),updatedAt:now()}; this.integrations.push(integration); }
+    if (integration) Object.assign(integration, {name,secretEncrypted,config:config??integration.config??{},enabled,updatedAt:now()});
+    else { integration={id:uid(),organizationId,provider,name,secretEncrypted,config:config??{},enabled,createdAt:now(),updatedAt:now()}; this.integrations.push(integration); }
     return clone(integration);
   }
   async getIntegration(organizationId, provider) { return clone(this.integrations.find((x)=>x.organizationId===organizationId && x.provider===provider)); }
   async listIntegrations(organizationId) { return this.integrations.filter((x)=>x.organizationId===organizationId).map(({secretEncrypted,...rest})=>clone(rest)); }
+  async deleteIntegration(organizationId, provider) {
+    const before=this.integrations.length;
+    this.integrations=this.integrations.filter((x)=>!(x.organizationId===organizationId&&x.provider===provider));
+    return this.integrations.length<before;
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — durable notification deliveries and immutable attempts.
+  //
+  // The in-process store mirrors the PostgreSQL contract exactly: deliveries
+  // are claimed by lease token, an attempt is written for every provider call,
+  // and no update may overwrite history written by another lease.
+  // ---------------------------------------------------------------------
+  #deliveryView(delivery) { return clone(delivery); }
+  async enqueueDeliveries(records) {
+    const inserted=[];
+    for(const record of records){
+      const duplicate=this.notificationDeliveries.find((d)=>d.organizationId===record.organizationId&&d.routingId===record.routingId
+        &&(record.escalationJobId?d.escalationJobId===record.escalationJobId:d.escalationJobId===null)
+        &&d.provider===record.provider);
+      if(duplicate)continue;
+      const at=now();
+      const delivery={
+        id:record.id??uid(),organizationId:record.organizationId,alertId:record.alertId,routingId:record.routingId,
+        escalationJobId:record.escalationJobId??null,provider:record.provider,
+        destinationSnapshot:record.destinationSnapshot??{},responderUserId:record.responderUserId??null,
+        responderNameSnapshot:record.responderNameSnapshot??null,status:record.status??'PENDING',
+        scheduledAt:record.scheduledAt??at,attemptCount:record.attemptCount??0,nextAttemptAt:record.nextAttemptAt??record.scheduledAt??at,
+        leaseOwner:null,leaseExpiresAt:null,lastAttemptAt:null,completedAt:null,lastError:null,
+        manualRetryByUserId:null,createdAt:at,updatedAt:at
+      };
+      this.notificationDeliveries.push(delivery);
+      inserted.push(clone(delivery));
+    }
+    return inserted;
+  }
+  async listAlertDeliveries(organizationId, alertId) {
+    return this.notificationDeliveries.filter((d)=>d.organizationId===organizationId&&d.alertId===alertId)
+      .sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt)||String(a.id).localeCompare(String(b.id))).map((d)=>this.#deliveryView(d));
+  }
+  async listDeliveries(organizationId, { limit = 200 } = {}) {
+    const size=Math.max(1,Math.min(500,Number(limit)||200));
+    return this.notificationDeliveries.filter((d)=>d.organizationId===organizationId)
+      .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,size).map((d)=>this.#deliveryView(d));
+  }
+  async getDelivery(organizationId, deliveryId) { return this.#deliveryView(this.notificationDeliveries.find((d)=>d.organizationId===organizationId&&d.id===deliveryId)); }
+  async listDeliveryAttempts(organizationId, deliveryId) {
+    return this.notificationAttempts.filter((a)=>a.organizationId===organizationId&&a.deliveryId===deliveryId)
+      .sort((a,b)=>a.attemptNumber-b.attemptNumber).map(clone);
+  }
+  /** Deliveries that are due now, or whose lease expired, ordered deterministically. */
+  #dueDeliveries(at, { alertId = null } = {}) {
+    const instant=new Date(at).getTime();
+    return this.notificationDeliveries
+      .filter((d)=>(!alertId||d.alertId===alertId))
+      .filter((d)=>(['PENDING','RETRYING'].includes(d.status)&&new Date(d.nextAttemptAt).getTime()<=instant)
+        ||(d.status==='IN_FLIGHT'&&new Date(d.leaseExpiresAt??0).getTime()<instant))
+      .sort((a,b)=>new Date(a.nextAttemptAt)-new Date(b.nextAttemptAt)||String(a.id).localeCompare(String(b.id)));
+  }
+  async listDueDeliveries(organizationId, { now: at = now(), limit = 200, alertId = null } = {}) {
+    return this.#dueDeliveries(at,{alertId}).filter((d)=>d.organizationId===organizationId).slice(0,limit).map((d)=>this.#deliveryView(d));
+  }
+  async claimDueDeliveries({ now: at = now(), leaseOwner, leaseSeconds = 120, limit = 20, alertId = null }) {
+    const claimed=[];
+    for(const delivery of this.#dueDeliveries(at,{alertId})){
+      if(claimed.length>=limit)break;
+      delivery.status='IN_FLIGHT';
+      delivery.leaseOwner=leaseOwner;
+      delivery.leaseExpiresAt=new Date(new Date(at).getTime()+leaseSeconds*1000).toISOString();
+      delivery.updatedAt=now();
+      claimed.push(clone(delivery));
+    }
+    return claimed;
+  }
+  async recoverExpiredDeliveryLeases(at = now(), { limit = 100 } = {}) {
+    const instant=new Date(at).getTime();let recovered=0;
+    for(const delivery of this.notificationDeliveries){
+      if(recovered>=limit)break;
+      if(delivery.status!=='IN_FLIGHT'||new Date(delivery.leaseExpiresAt??0).getTime()>=instant)continue;
+      delivery.status=delivery.attemptCount>0?'RETRYING':'PENDING';
+      delivery.nextAttemptAt=new Date(at).toISOString();
+      delivery.leaseOwner=null;delivery.leaseExpiresAt=null;delivery.updatedAt=now();
+      recovered+=1;
+    }
+    return recovered;
+  }
+  /**
+   * Persist one attempt and move the logical delivery forward. `skipAttempt`
+   * records a configuration gap (no provider call was made) without inventing
+   * an attempt row. A stale lease cannot write here at all.
+   */
+  async completeDelivery({ deliveryId, organizationId, leaseOwner, attemptNumber, startedAt, completedAt, outcome, status, nextAttemptAt = null, safeError = null, providerStatusCode = null, manualRetryByUserId = null, skipAttempt = false }) {
+    const delivery=this.notificationDeliveries.find((d)=>d.organizationId===organizationId&&d.id===deliveryId);
+    if(!delivery)return undefined;
+    if(delivery.leaseOwner!==leaseOwner)return {staleLease:true,delivery:this.#deliveryView(delivery)};
+    let attempt;
+    if(!skipAttempt){
+      attempt={id:uid(),organizationId,deliveryId,attemptNumber,startedAt,completedAt,outcome,providerStatusCode,safeError,
+        manualRetryByUserId:manualRetryByUserId??null,manual:Boolean(manualRetryByUserId),createdAt:now()};
+      this.notificationAttempts.push(attempt);
+    }
+    Object.assign(delivery,{
+      status,attemptCount:skipAttempt?delivery.attemptCount:attemptNumber,
+      lastAttemptAt:skipAttempt?delivery.lastAttemptAt:completedAt,
+      nextAttemptAt:nextAttemptAt??new Date(completedAt).toISOString(),
+      completedAt:['SENT','FAILED','CANCELLED'].includes(status)?(completedAt??now()):null,
+      lastError:safeError?String(safeError).slice(0,900):(['SENT'].includes(status)?null:delivery.lastError),
+      leaseOwner:null,leaseExpiresAt:null,manualRetryByUserId:null,updatedAt:now()
+    });
+    return {staleLease:false,delivery:this.#deliveryView(delivery),attempt:attempt?clone(attempt):undefined};
+  }
+  async scheduleManualRetry({ organizationId, deliveryId, userId, now: at = now() }) {
+    const delivery=this.notificationDeliveries.find((d)=>d.organizationId===organizationId&&d.id===deliveryId);
+    if(!delivery)return undefined;
+    // Attempts are never erased. The manual retry schedules another attempt and
+    // records who asked for it; the original FAILED history stays readable.
+    delivery.status='RETRYING';
+    delivery.nextAttemptAt=new Date(at).toISOString();
+    delivery.manualRetryByUserId=userId;
+    delivery.leaseOwner=null;delivery.leaseExpiresAt=null;
+    delivery.completedAt=null;
+    delivery.updatedAt=now();
+    return this.#deliveryView(delivery);
+  }
+  async claimDueEscalationJobs({ now: at = now(), leaseOwner, leaseSeconds = 120, limit = 20 }) {
+    const instant=new Date(at).getTime();const claimed=[];
+    for(const job of this.escalationJobs){
+      if(claimed.length>=limit)break;
+      const due=(job.state==='PENDING'&&new Date(job.dueAt).getTime()<=instant)
+        ||(job.state==='IN_FLIGHT'&&new Date(job.leaseExpiresAt??0).getTime()<instant);
+      if(!due)continue;
+      job.state='IN_FLIGHT';job.leaseOwner=leaseOwner;job.claimedAt=new Date(at).toISOString();
+      job.leaseExpiresAt=new Date(instant+leaseSeconds*1000).toISOString();job.updatedAt=now();
+      claimed.push(clone(job));
+    }
+    return claimed;
+  }
+  async recoverExpiredEscalationLeases(at = now(), { limit = 100 } = {}) {
+    const instant=new Date(at).getTime();let recovered=0;
+    for(const job of this.escalationJobs){
+      if(recovered>=limit)break;
+      if(job.state!=='IN_FLIGHT'||new Date(job.leaseExpiresAt??0).getTime()>=instant)continue;
+      job.state='PENDING';job.leaseOwner=null;job.leaseExpiresAt=null;job.updatedAt=now();
+      recovered+=1;
+    }
+    return recovered;
+  }
+  async completeEscalationJob({ organizationId, jobId, leaseOwner, state, responderUserId = null, responderNameSnapshot = null, result = {}, deliveries = [] }) {
+    const job=this.escalationJobs.find((j)=>j.organizationId===organizationId&&j.id===jobId);
+    if(!job)return undefined;
+    if(job.leaseOwner!==leaseOwner)return {staleLease:true,job:clone(job)};
+    const at=now();
+    if(deliveries.length)await this.enqueueDeliveries(deliveries);
+    Object.assign(job,{
+      state,resolvedResponderUserId:responderUserId,resolvedResponderNameSnapshot:responderNameSnapshot,
+      result:{...clone(result),deliveryCount:deliveries.length},executedAt:state==='COMPLETED'?at:(job.executedAt??null),
+      leaseOwner:null,leaseExpiresAt:null,updatedAt:at
+    });
+    return {staleLease:false,job:clone(job)};
+  }
 }
