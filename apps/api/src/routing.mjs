@@ -24,12 +24,14 @@ export async function evaluateAlertRouting({ store, organizationId, alert, at })
     return {
       resolution: 'NO_MATCHING_RULE', ruleId: null, ruleName: null, scheduleId: null, scheduleName: null,
       teamId: null, teamName: null, oncallUserId: null, oncallDisplayName: null, responderSource: null,
+      notificationChannels: [], escalationPolicyId: null,
       overrideId: null, periodStartsAt: null, periodEndsAt: null, timeZone: null
     };
   }
   const schedule = await store.getSchedule(organizationId, rule.targetScheduleId);
   const base = {
     ruleId: rule.id, ruleName: rule.name,
+    notificationChannels: rule.notificationChannels ?? ['DISCORD'], escalationPolicyId: rule.escalationPolicyId ?? null,
     scheduleId: schedule?.id ?? rule.targetScheduleId, scheduleName: schedule?.name ?? null,
     teamId: schedule?.teamId ?? null, teamName: schedule?.teamName ?? null,
     timeZone: schedule?.timeZone ?? 'UTC'
@@ -56,6 +58,11 @@ export async function evaluateAlertRouting({ store, organizationId, alert, at })
  */
 export async function deliverAlertNotification({ store, config, organizationId, alert, decision, fetchImpl = fetch, logger = console }) {
   if (!decision.oncallUserId) return { status: 'SKIPPED_NO_RESPONDER', provider: null };
+  const channels=decision.notificationChannels??['DISCORD'];
+  // Never silently route a configured Slack/Email page through Discord. Those
+  // adapters are intentionally unavailable until their secret and transport
+  // boundaries are implemented and qualified.
+  if(channels.length!==1||channels[0]!=='DISCORD')return{status:'FAILED',provider:channels.join(','),error:'One or more configured notification channels are not available in this build.'};
   const integration = await store.getIntegration(organizationId, 'DISCORD');
   if (!integration) return { status: 'SKIPPED_NO_INTEGRATION', provider: 'DISCORD' };
   if (!integration.enabled) return { status: 'SKIPPED_DISABLED', provider: 'DISCORD' };

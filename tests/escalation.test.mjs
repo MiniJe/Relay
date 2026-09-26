@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateEscalationSteps, materializeEscalationPlan, cancelUnexecutedEscalations, dueRetryAt, classifyDeliveryFailure, sanitizeNotificationText } from '../packages/shared/escalation.mjs';
 import { MemoryStore } from '../packages/database/memory-store.mjs';
+import { deliverAlertNotification } from '../apps/api/src/routing.mjs';
 
 test('escalation steps are deterministic, strictly ordered and reject duplicate positions or times',()=>{
   const steps=[{position:0,afterMinutes:5,targetScheduleId:'a',channels:['DISCORD']},{position:1,afterMinutes:15,targetScheduleId:'b',channels:['EMAIL','SLACK']}];
@@ -54,6 +55,14 @@ test('policy edits and deletion do not rewrite an already materialized plan',asy
   assert.equal((await store.listEscalationJobs('org','alert'))[0].targetScheduleNameSnapshot,'Primary');
   await store.materializeEscalationJobs(plan);
   assert.equal((await store.listEscalationJobs('org','alert')).length,1);
+});
+
+test('unavailable configured channels fail closed instead of being misrouted to Discord',async()=>{
+  let integrationLookups=0;
+  const result=await deliverAlertNotification({store:{async getIntegration(){integrationLookups++;}},config:{},organizationId:'org',alert:{},decision:{oncallUserId:'responder',notificationChannels:['SLACK']}});
+  assert.equal(result.status,'FAILED');
+  assert.equal(result.provider,'SLACK');
+  assert.equal(integrationLookups,0);
 });
 
 test('provider text neutralizes mentions, controls and hostile Slack syntax',()=>{ 
