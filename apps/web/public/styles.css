@@ -41,3 +41,13 @@
 .ack-yes{color:#86efac;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.22)}
 .ack-no{color:#fdba74;background:rgba(249,115,22,.08);border-color:rgba(249,115,22,.22)}
 @media(max-width:760px){.oncall-grid{grid-template-columns:1fr}.inline-form{flex-direction:column;align-items:stretch}.inline-form .select{min-width:0;width:100%}.order-input{margin-left:auto}}
+/* Relay 0.2 — narrow-viewport containment.
+   Grid and flex items default to `min-width:auto`, so a single long opaque
+   token (an email address, a UUID, a select option, a table's min-width) can
+   force the whole document wider than a 390px viewport. Every container that
+   can hold such content therefore allows its children to shrink, and long
+   tokens are permitted to break. Purely corrective: no visual redesign. */
+.card,.table-wrap,.member-list,.chips,.rotation-list,.oncall-grid,.grid>*{min-width:0}
+.member-list>*,.chips>*,.rotation-list>li,.section-head>*,.oncall-meta>*,.user-chip>*{min-width:0}
+.user-meta span,.rotation-list .subtext,.chip,.oncall-meta .subtext,.override-note{overflow-wrap:anywhere}
+@media(max-width:760px){.grid-4,.grid-3,.grid-2{grid-template-columns:minmax(0,1fr)}.panel-form{grid-template-columns:minmax(0,1fr)}.panel-form .input,.panel-form .select,.panel-form .textarea,.inline-form .input,.inline-form .select{min-width:0;width:100%}.section-head{flex-wrap:wrap;gap:4px}}

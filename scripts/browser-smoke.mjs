@@ -557,8 +557,23 @@ async function main() {
         const scheduleId = schedule.body?.data?.id ?? null;
         const badTz = teamId ? await call('/oncall/schedules', { name: 'Bad tz', teamId, timeZone: 'Not/AZone', rotationStartsAt: new Date().toISOString(), rotationIntervalMinutes: 1440, participantUserIds: [me.data.user.id] }) : { status: 0 };
         const rule = scheduleId ? await call('/routing-rules', { name: 'Smoke criticals ${marker}', priority: 10, matchSource: 'browser-smoke', matchSeverities: ['critical'], targetScheduleId: scheduleId }) : { status: 0 };
+        const override = scheduleId ? await call('/oncall/schedules/' + scheduleId + '/overrides', {
+          replacementUserId: me.data.user.id,
+          startsAt: new Date(Date.now() + 86400000).toISOString(),
+          endsAt: new Date(Date.now() + 90000000).toISOString(),
+          reason: 'Smoke override ${marker}'
+        }) : { status: 0 };
+        const overlapping = scheduleId ? await call('/oncall/schedules/' + scheduleId + '/overrides', {
+          replacementUserId: me.data.user.id,
+          startsAt: new Date(Date.now() + 87000000).toISOString(),
+          endsAt: new Date(Date.now() + 91000000).toISOString(),
+          reason: 'Smoke clash'
+        }) : { status: 0 };
         const state = await call('/oncall/state');
         return {
+          override: override.status,
+          overlapStatus: overlapping.status,
+          overlapCode: overlapping.body?.error?.code ?? null,
           orgSlug: org.body?.data?.slug ?? null,
           displayName: me.data?.user?.displayName ?? null,
           team: team.status, member: member.status, owned: owned.status,
@@ -569,7 +584,8 @@ async function main() {
           timeZone: state.body?.data?.oncall?.[0]?.schedule?.timeZone ?? null
         };
       })()`);
-      check('operator can provision team, membership, schedule and routing rule via API', provisioned02.team === 201 && provisioned02.member === 201 && provisioned02.owned === 200 && provisioned02.schedule === 201 && provisioned02.rule === 201, JSON.stringify(provisioned02));
+      check('operator can provision team, membership, schedule, override and routing rule via API', provisioned02.team === 201 && provisioned02.member === 201 && provisioned02.owned === 200 && provisioned02.schedule === 201 && provisioned02.override === 201 && provisioned02.rule === 201, JSON.stringify(provisioned02));
+      check('an overlapping override is refused deterministically', provisioned02.overlapStatus === 409 && provisioned02.overlapCode === 'OVERRIDE_OVERLAP', `status ${provisioned02.overlapStatus} code ${provisioned02.overlapCode}`);
       check('a malformed schedule timezone is rejected before it reaches the UI', provisioned02.badTzStatus === 400 && provisioned02.badTzCode === 'INVALID_TIMEZONE', `status ${provisioned02.badTzStatus} code ${provisioned02.badTzCode}`);
       check('on-call state resolves a responder server-side', provisioned02.resolvedUserId === provisioned02.meId, `resolved ${provisioned02.resolvedUserId} vs me ${provisioned02.meId}`);
       check('on-call state reports the schedule IANA timezone', provisioned02.timeZone === 'Europe/Bucharest', String(provisioned02.timeZone));
@@ -588,6 +604,13 @@ async function main() {
       } else {
         console.log('      note: ALERT_INGEST_KEY unavailable, so the routed-alert table pass is skipped');
       }
+
+      // Provisioning deliberately provokes a 400 (malformed timezone) and a 409
+      // (overlapping override). Those rejections are the point of the checks
+      // above, but the browser still reports them as failed resources, so drain
+      // them here and confirm nothing else was logged.
+      const rejectionNoise = page.problems(page.take());
+      check('the only network noise from provisioning is the two deliberate rejections', rejectionNoise.length <= 2 && rejectionNoise.every((p) => /40[09]/.test(p)), rejectionNoise.join(' | '));
 
       await page.goto(`${baseUrl}/app/oncall`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.content h1')` });
       const oncallView = await page.evaluate(`(() => {
@@ -622,12 +645,15 @@ async function main() {
           participants: box?.querySelectorAll('.rotation-list li').length ?? 0,
           firstPosition: (box?.querySelector('.rotation-pos')?.textContent ?? '').trim(),
           inScheduleTimeZone: text.includes('Europe/Bucharest'),
+          listsOverride: text.includes('Smoke override ${marker}'),
+          overrideWindowsLabeled: /UTC[+-]|Europe\/Bucharest/.test(text),
           deleteOverride: !!box?.querySelector('[data-delete-override]')
         };
       })()`);
       check('rotation detail lists participants in configured order', rotationDetail.participants >= 1 && rotationDetail.firstPosition === '1', JSON.stringify(rotationDetail));
       check('rotation detail renders in the schedule timezone', rotationDetail.inScheduleTimeZone === true, JSON.stringify(rotationDetail));
-      check('rotation detail offers override deletion to an OWNER', rotationDetail.deleteOverride === true);
+      check('rotation detail lists the schedule override with its reason', rotationDetail.listsOverride === true, JSON.stringify(rotationDetail));
+      check('rotation detail offers override deletion to an OWNER', rotationDetail.deleteOverride === true, JSON.stringify(rotationDetail));
       const oncallProblems = page.problems(page.take());
       check('on-call view free of console/exception/MIME/request failures', oncallProblems.length === 0, oncallProblems.join(' | '));
       const oncallShot = await page.screenshot('oncall-desktop');
@@ -710,9 +736,22 @@ async function main() {
         await page.goto(`${baseUrl}/app`, { waitFor: `!!document.querySelector('.app-shell')` });
         for (const route of ['/app', '/app/alerts', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages']) {
           if (route !== '/app') await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell')` });
-          const delta = await page.evaluate(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
+          const measured = await page.evaluate(`(() => {
+            const cw = document.documentElement.clientWidth;
+            const delta = document.documentElement.scrollWidth - cw;
+            if (delta <= 1) return { delta };
+            const offenders = [];
+            for (const el of document.querySelectorAll('body *')) {
+              const rect = el.getBoundingClientRect();
+              if (rect.right > cw + 1) {
+                offenders.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : '') + ' right=' + Math.round(rect.right) + ' w=' + Math.round(rect.width) + ' ' + JSON.stringify((el.textContent || '').trim().slice(0, 28)));
+              }
+            }
+            return { delta, offenders: offenders.slice(0, 6) };
+          })()`);
+          const delta = measured.delta;
           dashOverflow[`${viewport.label} ${route}`] = delta;
-          check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px`);
+          check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px past a ${await page.evaluate('document.documentElement.clientWidth')}px viewport; offenders: ${(measured.offenders ?? []).join(' , ') || 'none identified'}`);
         }
         const file = await page.screenshot(`dashboard-${viewport.label}`);
         if (file) console.log(`      screenshot: ${file}`);
