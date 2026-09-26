@@ -65,8 +65,13 @@ CREATE TABLE escalation_jobs (
   channels JSONB NOT NULL,
   state TEXT NOT NULL DEFAULT 'PENDING',
   claimed_at TIMESTAMPTZ,
+  lease_owner TEXT,
   lease_expires_at TIMESTAMPTZ,
   executed_at TIMESTAMPTZ,
+  -- Snapshot of who was actually resolved when the step executed, so the
+  -- execution history survives later rotation changes.
+  resolved_responder_user_id TEXT,
+  resolved_responder_name_snapshot TEXT,
   result JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -78,6 +83,7 @@ CREATE TABLE escalation_jobs (
   CHECK (state IN ('PENDING','IN_FLIGHT','COMPLETED','FAILED','CANCELLED_ACKNOWLEDGED'))
 );
 CREATE INDEX idx_escalation_jobs_due ON escalation_jobs(due_at, id) WHERE state IN ('PENDING','IN_FLIGHT');
+CREATE INDEX idx_escalation_jobs_lease ON escalation_jobs(lease_expires_at) WHERE state='IN_FLIGHT';
 
 CREATE TABLE notification_deliveries (
   id TEXT PRIMARY KEY,
@@ -96,7 +102,11 @@ CREATE TABLE notification_deliveries (
   last_attempt_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ,
   last_error TEXT,
+  -- Lease ownership. A worker may only write an outcome while it still owns the
+  -- lease, so reclaimed work can never be overwritten by a zombie process.
+  lease_owner TEXT,
   lease_expires_at TIMESTAMPTZ,
+  manual_retry_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   FOREIGN KEY (organization_id, alert_id) REFERENCES alerts(organization_id, id) ON DELETE CASCADE,
@@ -105,10 +115,21 @@ CREATE TABLE notification_deliveries (
   FOREIGN KEY (organization_id, escalation_job_id) REFERENCES escalation_jobs(organization_id, id) ON DELETE SET NULL (escalation_job_id),
   CHECK (provider IN ('DISCORD','SLACK','EMAIL')),
   CHECK (status IN ('PENDING','IN_FLIGHT','RETRYING','SENT','FAILED','CANCELLED')),
-  CHECK (attempt_count >= 0)
+  CHECK (attempt_count >= 0),
+  -- Manual retries may add attempts beyond the bounded automatic policy, but a
+  -- SENT delivery is never silently re-queued.
+  CHECK (manual_retry_by_user_id IS NULL OR status <> 'SENT')
 );
 CREATE INDEX idx_notification_deliveries_due ON notification_deliveries(next_attempt_at, id) WHERE status IN ('PENDING','RETRYING','IN_FLIGHT');
+CREATE INDEX idx_notification_deliveries_lease ON notification_deliveries(lease_expires_at) WHERE status='IN_FLIGHT';
 CREATE INDEX idx_notification_deliveries_org_alert ON notification_deliveries(organization_id, alert_id, created_at);
+-- Idempotency: one logical delivery per (routing, escalation step, provider).
+-- Duplicate alert intake, a replayed route pass or a reclaimed escalation step
+-- can therefore never create a second page for the same channel.
+CREATE UNIQUE INDEX ux_notification_deliveries_immediate
+  ON notification_deliveries(organization_id, routing_id, provider) WHERE escalation_job_id IS NULL;
+CREATE UNIQUE INDEX ux_notification_deliveries_escalation
+  ON notification_deliveries(organization_id, escalation_job_id, provider) WHERE escalation_job_id IS NOT NULL;
 
 CREATE TABLE notification_attempts (
   id TEXT PRIMARY KEY,
@@ -120,12 +141,14 @@ CREATE TABLE notification_attempts (
   completed_at TIMESTAMPTZ NOT NULL,
   error_code TEXT,
   safe_error TEXT,
-  initiated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  provider_status_code INTEGER,
+  manual_retry_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   manual BOOLEAN NOT NULL DEFAULT FALSE,
   UNIQUE (delivery_id, attempt_number),
   FOREIGN KEY (organization_id, delivery_id) REFERENCES notification_deliveries(organization_id, id) ON DELETE CASCADE,
   CHECK (outcome IN ('SENT','RETRYABLE_FAILURE','PERMANENT_FAILURE')),
-  CHECK (attempt_number > 0)
+  CHECK (attempt_number > 0),
+  CHECK (provider_status_code IS NULL OR (provider_status_code >= 100 AND provider_status_code <= 599))
 );
 CREATE INDEX idx_notification_attempts_delivery ON notification_attempts(delivery_id, attempt_number);
 

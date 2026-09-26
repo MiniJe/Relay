@@ -4,12 +4,17 @@ Release 0.2 turns Relay's durable alert intake into a routing system with an
 answer to the only question that matters at 03:00: **who is responsible right
 now?**
 
-This document describes Relay 0.2 as a two-milestone release. **RLY-0.2-M-001**
-provides alert routing and on-call foundations. **RLY-0.2-M-002** adds escalation
-policy definitions, policy snapshots and the initial durable-delivery schema.
-M-002 remains in progress: provider delivery execution, restart-safe worker
-processing, and the operational UI/qualification are not yet complete. Relay
-0.2 must not be described as functionally complete until those gates pass.
+This document describes Relay 0.2 as a two-milestone release:
+
+- **M-001 — Alert Routing & On-Call Foundation**;
+- **M-002 — Escalation, Multi-Channel Paging & Durable Delivery**.
+
+Relay 0.2 functional implementation is complete pending Founder integration and
+release qualification. "Complete" here means the implementation and its
+verification are finished in this repository — every acceptance criterion is
+exercised by tests, real-PostgreSQL worker qualification, a production
+deployment check and a real-browser pass. It does not mean the release has been
+integrated by the Founder or tagged.
 
 ## Release purpose
 
@@ -42,7 +47,7 @@ The invariant that governs the whole milestone:
 > notification all happen after the intake transaction commits. A misconfigured
 > schedule, a broken webhook or a routing bug can never lose an alert.
 
-## Milestone RLY-0.2-M-001 — implemented
+## Milestone RLY-0.2-M-001 — Alert Routing & On-Call Foundation
 
 ### Responder teams
 
@@ -242,23 +247,199 @@ never an authorization boundary.
   PostgreSQL;
 - all 0.1 tests still pass unchanged.
 
-## Milestone RLY-0.2-M-002 — in progress
+## Milestone RLY-0.2-M-002 — Escalation, Multi-Channel Paging & Durable Delivery
 
-The repository now contains first-class organization-scoped policy/step storage,
-REST policy CRUD, rule channel/policy configuration, deterministic validation
-and due-time calculation, policy/schedule snapshot materialization, and the
-additive `003_escalation_delivery.sql` schema for escalation jobs, delivery
-outbox rows and attempt audit. These are foundations, not a claim that the M-002
-acceptance criteria have passed. Durable enqueue-and-dispatch, worker leasing
-and recovery, Slack/SMTP adapters, delivery APIs, acknowledgement-driven job
-cancellation, and alert/escalation operational surfaces still require
-implementation and PostgreSQL/production/browser qualification.
+M-001 answered *who is responsible right now*. M-002 makes the page itself
+durable, multi-channel and escalation-aware: a delivery that has been decided is
+a persisted row with an attempt history, not an HTTP call made while a request
+waits.
+
+### Durable delivery outbox
+
+- routing creates one logical delivery per configured channel in the same
+  decision that resolves the responder; the row exists before any provider is
+  contacted, so a crash can no longer lose a page;
+- an escalation step creates its own deliveries when it executes;
+- identity is enforced by partial unique indexes — `(alert, provider)` for the
+  immediate page and `(escalation job, provider)` for step pages — so
+  re-evaluating routing or replaying intake can never page twice;
+- states are explicit and finite: `PENDING`, `IN_FLIGHT`, `RETRYING`, `SENT`,
+  `FAILED`, `CANCELLED`;
+- the destination is snapshotted from the stored integration and the responder's
+  canonical account. Alert content can never choose a URL or a recipient.
+
+### Attempt audit
+
+- every provider call writes one immutable `notification_attempts` row with the
+  attempt number, outcome (`SENT`, `RETRYABLE_FAILURE`, `PERMANENT_FAILURE`),
+  provider status code, bounded error text, timestamps and — for a manual retry —
+  the requesting user;
+- attempts are append-only: retrying extends the history instead of rewriting
+  it, and the delivery keeps its count, next-attempt instant and last error;
+- the compact M-001 routing summary (`notificationStatus`, provider, error) is
+  still written next to the routing record, so existing clients keep working.
+
+### Bounded retries and manual retry
+
+- at most three attempts per delivery, at 1 minute and 5 minutes after the
+  previous attempt;
+- HTTP 408/425/429 and 5xx, timeouts, connection failures and SMTP 4xx retry;
+  other HTTP 4xx and SMTP 5xx/authentication failures are permanent; unknown
+  failures retry, because a bounded retry beats a silently dropped page;
+- `POST /organizations/{organizationId}/deliveries/{deliveryId}/retry` lets an
+  OWNER, ADMIN or RESPONDER retry a page that was not delivered; a delivered
+  page answers `409`, a cancelled one answers `409`, and both keep their
+  history. VIEWER is rejected server-side.
+
+### Worker, leasing and restart recovery
+
+- the server starts the worker only after the store is ready and stops it before
+  the pool closes; the deterministic core (`processDueWork`) takes an explicit
+  clock and performs no sleeping, which is what the qualification tests drive;
+- claims happen in a short transaction using `SELECT … FOR UPDATE SKIP LOCKED`
+  followed by an `IN_FLIGHT` lease; **every provider call happens outside any
+  transaction**;
+- a write must present the matching lease token, so a crashed or stalled worker
+  whose lease expired can never overwrite the outcome recorded by the worker
+  that recovered the work;
+- expired leases are recovered in PostgreSQL at the start of each pass, so a
+  restart needs no in-memory state: abandoned pages become claimable again and
+  are delivered exactly once;
+- `SKIP LOCKED` makes concurrent workers take disjoint sets. The qualification
+  test runs four workers over eight due pages and asserts eight provider calls,
+  eight single-attempt deliveries and no duplicate attempt rows.
+
+### Escalation execution
+
+- materialized jobs run through the worker; the responder is resolved at
+  execution time from the step's schedule, so a rotation that moved on between
+  routing and the due instant pages the person who is actually on call;
+- a step whose schedule resolves nobody is recorded as unresolved with its
+  reason and is never retried into a page for the wrong person;
+- `completeEscalationJob` locks the routing row and re-reads the acknowledgement
+  inside the same transaction that inserts the step's deliveries, so an
+  acknowledgement and a step execution are strictly serialized: either the
+  acknowledgement is observed (step cancelled, no page created) or the page was
+  already durably created before the acknowledgement committed.
+
+### Acknowledgement-driven cancellation
+
+- the first acknowledgement still wins under a row lock;
+- pending steps become `CANCELLED_ACKNOWLEDGED` and can no longer create pages;
+- deliveries that have not reached a provider become `CANCELLED`; a page that
+  was already sent keeps its status, its attempts and its timestamps;
+- an executed step is never rewritten by a later acknowledgement, and
+  acknowledging an alert still does not create or resolve an incident.
+
+### Channels: Discord, Slack, SMTP
+
+- **Discord** keeps the M-001 adapter and boundary (Discord HTTPS webhooks,
+  mention pinning, `allowed_mentions`);
+- **Slack** uses Incoming Webhooks only: `https://hooks.slack.com/services/…`,
+  HTTPS, exact host and path, no query string or fragment. Slack bots, slash
+  commands, interactive incident management and OAuth are deliberately absent.
+  Alert text is sanitized so `<@U…>`, `<!channel>`, `<!here>`, `<!everyone>` and
+  `<!subteam^…>` cannot broadcast a mention, and `parse`/`link_names` is never
+  sent;
+- **Email** pages the responder at their own Relay account address over SMTP via
+  `nodemailer` (STARTTLS or implicit TLS, TLS 1.2 minimum, bounded timeouts).
+  The recipient is resolved server-side, so alert text can never choose who is
+  emailed; CR/LF/NUL are rejected at validation and stripped when the subject or
+  `From` header is formatted; SMTP 4xx/5xx and authentication errors are
+  classified into the shared retry policy;
+- a channel that is not configured, or is disabled, fails closed: the routing
+  summary reports `SKIPPED_NO_INTEGRATION`/`SKIPPED_DISABLED`, the delivery is
+  terminal with an operator-readable reason, and the page is **never** rerouted
+  to a different provider the operator did not choose.
+
+### Secrets
+
+- Slack webhook URLs and the SMTP password are stored with AES-256-GCM and are
+  never returned by any read, never logged and never written into a delivery or
+  attempt row. SMTP reads report `passwordConfigured` as a boolean only;
+- provider errors are truncated and sanitized before they reach a log, an attempt
+  or a response, so an error can carry `HTTP 503` but never a token.
+
+### Interface
+
+Five operator surfaces were added in the existing Quiet Operations style:
+
+- **Alert detail** (`/app/alerts/{alertId}`) — routing record, per-channel pages
+  with state labels, attempt trails, next attempt, failure reasons, a manual
+  retry action where it applies, the escalation plan with per-step state and the
+  resolved responder, and acknowledgement state;
+- **Escalations** (`/app/escalations`) — due/scheduled and executed/cancelled
+  steps for the most recent routed alerts, read from persisted jobs only;
+- **Routing** — per-rule channel selection, the attached escalation policy, and
+  an ordered policy editor (delay, schedule, channels per step);
+- **Settings** — Slack and SMTP configuration, where a stored credential is
+  shown as *stored* and never echoed into the form;
+- **Alerts** — the M-001 table now links each row to its detail page and keeps
+  its four-label summary strip (`Routed`, `Unacknowledged`, `Delivery failed`).
+
+State is always communicated with a text label next to the colour, configuration
+controls stay hidden for roles the server would reject anyway, and every view
+respects `prefers-reduced-motion` and qualifies at 1440×900, 1280×800 and
+390×844.
+
+### Permissions
+
+| Capability | OWNER | ADMIN | RESPONDER | VIEWER |
+| --- | --- | --- | --- | --- |
+| Configure integrations (Discord, Slack, SMTP), policies, rules, mappings | ✅ | ✅ | ❌ | ❌ |
+| Read deliveries, attempts and escalation state | ✅ | ✅ | ✅ | ✅ |
+| Retry a failed page manually | ✅ | ✅ | ✅ | ❌ |
+| Acknowledge an alert (cancels unsent pages) | ✅ | ✅ | ✅ | ❌ |
+
+### Persistence
+
+- `packages/database/migrations/003_escalation_delivery.sql` was **extended in
+  place** rather than superseded by a `004`: the branch carrying it is unmerged,
+  so no external environment has applied the earlier revision, and an in-place
+  extension keeps the schema readable as one unit. Anything already released
+  (000/001/002) is untouched. The migration adds lease/retry/snapshot columns,
+  partial lease indexes, the two idempotency unique indexes and the
+  `provider_status_code` CHECK;
+- `001_initial.sql` and `002_alert_routing_oncall.sql` are unchanged, and a
+  populated 0.2 database upgrades to the M-002 schema without rewriting a row
+  (`tests/migration-upgrade.test.mjs`);
+- `PostgresStore` and `MemoryStore` implement the same delivery/attempt/
+  escalation contract; PostgreSQL is the qualification target.
+
+### Verification
+
+- `tests/durable-delivery.test.mjs` — durable enqueue per channel, one immutable
+  attempt per call, bounded retries, permanent failures, manual-retry history,
+  acknowledgement cancellation, Slack/email sanitization and fail-closed
+  channels, all through the real HTTP API with injected provider transports (no
+  real Discord/Slack/SMTP traffic);
+- `tests/providers.test.mjs` — Slack URL validation and payload sanitization,
+  SMTP message construction, header-injection rejection, SMTP classification and
+  the retry plan;
+- `tests/worker.qualification.test.mjs` — real PostgreSQL: disjoint claims under
+  four concurrent workers, stale-lease refusal, restart recovery, and
+  acknowledgement-versus-escalation ordering;
+- `tests/postgres.contract.test.mjs` — schema constraints and the store contract
+  (including first-acknowledgement-wins and tenant isolation) on real
+  PostgreSQL;
+- `scripts/production-e2e.mjs` (`verify:production`, `verify:restart`) — a real
+  Docker deployment: delivery audit, attempt history, manual-retry semantics and
+  the escalation read model, then the same records re-verified after a container
+  restart, including that a delivered page is never re-sent;
+- `scripts/browser-smoke.mjs` (`verify:browser`) — a real browser at three
+  viewports: alert detail, escalations, routing channels, the policy editor and
+  the integration settings, plus the existing boot, MIME, keyboard, dialog,
+  responsive and reduced-motion contracts;
+- `scripts/verify-release-surface.mjs` (`verify:surface`) — the published
+  OpenAPI document, the shipped SPA routes/hooks and the pinned notification and
+  delivery status enums agree with the source tree.
 
 ## Beyond Relay 0.2
 The following are deliberately future work, not Relay 0.2 release blockers and
 must not be implemented as part of M-002:
 
-- SMS paging, phone-call paging and native push notifications;
+- SMS paging, phone-call paging and native push notifications (only Discord,
+  Slack Incoming Webhooks and SMTP email are in scope for 0.2);
 - a native mobile application;
 - complex follow-the-sun/layered schedules, weighted/fractional rotations and
   self-service shift swaps;

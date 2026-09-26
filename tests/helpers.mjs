@@ -2,17 +2,17 @@ import { once } from 'node:events';
 import { createRelayServer } from '../apps/api/src/app.mjs';
 import { MemoryStore } from '../packages/database/memory-store.mjs';
 
-export async function harness({fetchImpl=async()=>new Response(null,{status:204}),logger={warn(){},error(){}}}={}){
+export async function harness({fetchImpl=async()=>new Response(null,{status:204}),logger={warn(){},error(){},info(){}},transports={}}={}){
   const store=new MemoryStore();
   const config={nodeEnv:'test',port:0,appOrigin:'http://127.0.0.1',databaseUrl:'',sessionCookieName:'relay_session',sessionTtlHours:168,alertIngestKey:'test-alert-key-123',integrationEncryptionKey:'test-integration-encryption-key',staticDir:new URL('../apps/web/public/',import.meta.url).pathname,trustProxy:false};
-  const server=createRelayServer({store,config,fetchImpl,logger});
+  const server=createRelayServer({store,config,fetchImpl,logger,transports});
   server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();const base=`http://127.0.0.1:${address.port}`;config.appOrigin=base;
   const client=(cookie='')=>({
     async request(path,{method='GET',body,headers={}}={}){
       const res=await fetch(base+path,{method,headers:{...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{}),...headers},body:body?JSON.stringify(body):undefined});let json={};try{json=await res.json()}catch{}return{res,json,setCookie:res.headers.get('set-cookie')};
     }
   });
-  return{store,server,base,client,close:()=>new Promise((resolve)=>server.close(resolve))};
+  return{store,server,base,client,config,fetchImpl,transports,close:()=>new Promise((resolve)=>server.close(resolve))};
 }
 
 export async function register(client,email='owner@example.com',displayName='Owner'){

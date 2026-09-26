@@ -57,12 +57,23 @@ test('policy edits and deletion do not rewrite an already materialized plan',asy
   assert.equal((await store.listEscalationJobs('org','alert')).length,1);
 });
 
-test('unavailable configured channels fail closed instead of being misrouted to Discord',async()=>{
+test('unsupported configured channels fail closed instead of being misrouted to a real provider',async()=>{
+  // Relay 0.2 ships Discord, Slack Incoming Webhooks and SMTP. Anything else an
+  // operator configures is refused outright, and the decision is made before a
+  // single integration is even read, so a typo can never become a Discord page.
   let integrationLookups=0;
-  const result=await deliverAlertNotification({store:{async getIntegration(){integrationLookups++;}},config:{},organizationId:'org',alert:{},decision:{oncallUserId:'responder',notificationChannels:['SLACK']}});
+  const result=await deliverAlertNotification({store:{async getIntegration(){integrationLookups++;}},config:{},organizationId:'org',alert:{},decision:{oncallUserId:'responder',notificationChannels:['SMS']}});
   assert.equal(result.status,'FAILED');
-  assert.equal(result.provider,'SLACK');
+  assert.equal(result.provider,'SMS');
   assert.equal(integrationLookups,0);
+});
+
+test('a supported but unconfigured channel reports a skip rather than borrowing another transport',async()=>{
+  const lookups=[];
+  const result=await deliverAlertNotification({store:{async getIntegration(organizationId,provider){lookups.push(provider);return undefined;}},config:{},organizationId:'org',alert:{},decision:{oncallUserId:'responder',notificationChannels:['SLACK']}});
+  assert.equal(result.status,'SKIPPED_NO_INTEGRATION');
+  assert.equal(result.provider,'SLACK');
+  assert.deepEqual(lookups,['SLACK'],'only the configured channel is resolved; Discord is never substituted');
 });
 
 test('provider text neutralizes mentions, controls and hostile Slack syntax',()=>{ 

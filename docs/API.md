@@ -392,6 +392,8 @@ used instead.
 
 - `GET /organizations/:organizationId/integrations`
 - `PUT /organizations/:organizationId/integrations/discord`
+- `PUT|DELETE /organizations/:organizationId/integrations/slack` (OWNER/ADMIN)
+- `PUT|DELETE /organizations/:organizationId/integrations/smtp` (OWNER/ADMIN)
 
 Discord configuration payload:
 
@@ -403,7 +405,39 @@ Discord configuration payload:
 }
 ```
 
-The webhook secret is never returned by API reads.
+Slack accepts **only** an Incoming Webhook URL on `hooks.slack.com` with a
+`/services/…` path and no query string or fragment:
+
+```json
+{
+  "name": "Paging",
+  "webhookUrl": "https://hooks.slack.com/services/T000/B000/secret",
+  "enabled": true
+}
+```
+
+SMTP configuration payload (write-only password):
+
+```json
+{
+  "name": "Email",
+  "host": "smtp.example.com",
+  "port": 587,
+  "secure": false,
+  "username": "relay@example.com",
+  "password": "…",
+  "keepExistingPassword": false,
+  "fromEmail": "relay@example.com",
+  "fromName": "Relay Paging",
+  "enabled": true,
+  "timeoutMs": 10000
+}
+```
+
+`secure: true` (implicit TLS) is rejected on ports 25 and 587, which are STARTTLS
+ports. On an edit, omitting `password` keeps the stored credential. No read ever
+returns a webhook URL or a password: SMTP reads report `config.passwordConfigured`
+as a boolean.
 
 ## Realtime
 
@@ -414,7 +448,7 @@ Returns `text/event-stream`. Mutation events contain a small refresh envelope, n
 Relay 0.2 adds `alert.routed` (`alertId`, `resolution`) and
 `alert.acknowledged` (`alertId`) to the existing incident events.
 
-## Escalation policies (M-002 partial)
+## Escalation policies
 
 - `GET /api/v1/organizations/{organizationId}/escalation-policies`
 - `POST /api/v1/organizations/{organizationId}/escalation-policies`
@@ -425,7 +459,29 @@ Policy create/replace bodies contain `name`, optional `description`/`enabled`, a
 `targetScheduleId`, and `channels` (`DISCORD`, `SLACK`, `EMAIL`). Delays are
 measured from initial routing time. Routing-rule inputs accept
 `notificationChannels` (default `['DISCORD']`) and optional `escalationPolicyId`.
-The service validates organization ownership. Existing alert jobs snapshot policy
-and schedule names. The M-002 schema reserves delivery/attempt API data, but
-those delivery operations and a restart-safe dispatcher are not yet implemented.
-See [ESCALATION.md](ESCALATION.md) for the current qualification boundary.
+The service validates organization ownership and snapshots policy/schedule names
+onto existing jobs. See [ESCALATION.md](ESCALATION.md) for execution semantics,
+the delivery state machine and the retry policy.
+
+## Deliveries and escalation state
+
+- `GET /organizations/:organizationId/alerts/:alertId/deliveries` — every
+  logical page created for the alert plus a compact summary
+  (`total`, `status`, `label`, `attempts`, `nextAttemptAt`, `providers`);
+- `GET /organizations/:organizationId/deliveries/:deliveryId` — one delivery with
+  its immutable attempt history and the alert it belongs to;
+- `POST /organizations/:organizationId/deliveries/:deliveryId/retry`
+  (OWNER/ADMIN/RESPONDER) — schedules and immediately attempts a page that has
+  not been delivered. `202` on success, `409 DELIVERY_ALREADY_SENT` for a
+  delivered page, `409 DELIVERY_CANCELLED` for one cancelled by an
+  acknowledgement;
+- `GET /organizations/:organizationId/alerts/:alertId/escalation` — the
+  escalation read model: policy, planned/executed/cancelled/unresolved counts,
+  next due instant, `due`, the immediate deliveries and one entry per step with
+  its state, resolved responder at execution time, outcome and pages.
+
+Delivery reads always expose operator-readable labels (`Sent`, `Delivery failed`,
+`Retry scheduled`, `Queued`, `Sending`, `Cancelled` / `Scheduled`, `Executing`,
+`Executed`, `Unresolved`, `Cancelled (acknowledged)`) and never a secret. A
+delivery carries a non-secret destination snapshot: integration id and name,
+recipient email for email pages, and the Discord mention id when one was used.

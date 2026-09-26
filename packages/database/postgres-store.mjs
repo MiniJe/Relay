@@ -382,6 +382,12 @@ export class PostgresStore {
         acknowledged_by_display_name=$4,updated_at=now() WHERE organization_id=$1 AND alert_id=$2 RETURNING *`,
         [organizationId,alertId,userId,displayName??null],tx);
       await tx.unsafe(`UPDATE escalation_jobs SET state='CANCELLED_ACKNOWLEDGED',updated_at=now() WHERE organization_id=$1 AND alert_id=$2 AND state IN ('PENDING','IN_FLIGHT')`,[organizationId,alertId]);
+      // A delivery that never reached a provider is still a future page: once
+      // the alert is acknowledged it is cancelled. Deliveries with attempts keep
+      // their immutable history and continue to be retried/observed as recorded.
+      await tx.unsafe(`UPDATE notification_deliveries SET status='CANCELLED',completed_at=now(),next_attempt_at=now(),
+        lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+        WHERE organization_id=$1 AND alert_id=$2 AND status IN ('PENDING','RETRYING','IN_FLIGHT') AND attempt_count=0`,[organizationId,alertId]);
       return{routing,alreadyAcknowledged:false};
     });
   }
@@ -644,9 +650,188 @@ export class PostgresStore {
     const rows=await this.sql.unsafe(`DELETE FROM discord_identities WHERE organization_id=$1 AND user_id=$2 RETURNING id`,[organizationId,userId]);
     return rows.length>0;
   }
-  async upsertIntegration(organizationId,{provider,name,secretEncrypted,enabled}){
-    return this.#one(`INSERT INTO integrations(id,organization_id,provider,name,secret_encrypted,enabled) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(organization_id,provider) DO UPDATE SET name=excluded.name,secret_encrypted=excluded.secret_encrypted,enabled=excluded.enabled,updated_at=now() RETURNING *`,[uid(),organizationId,provider,name,secretEncrypted,enabled]);
+  async upsertIntegration(organizationId,{provider,name,secretEncrypted,config,enabled}){
+    return this.#one(`INSERT INTO integrations(id,organization_id,provider,name,secret_encrypted,config,enabled) VALUES($1,$2,$3,$4,$5,$6::text::jsonb,$7)
+      ON CONFLICT(organization_id,provider) DO UPDATE SET name=excluded.name,secret_encrypted=excluded.secret_encrypted,config=excluded.config,enabled=excluded.enabled,updated_at=now() RETURNING *`,
+      [uid(),organizationId,provider,name,secretEncrypted,JSON.stringify(config??{}),enabled]);
   }
   async getIntegration(organizationId,provider){return this.#one(`SELECT * FROM integrations WHERE organization_id=$1 AND provider=$2`,[organizationId,provider]);}
-  async listIntegrations(organizationId){return this.#many(`SELECT id,organization_id,provider,name,enabled,created_at,updated_at FROM integrations WHERE organization_id=$1 ORDER BY provider`,[organizationId]);}
+  async listIntegrations(organizationId){return this.#many(`SELECT id,organization_id,provider,name,config,enabled,created_at,updated_at FROM integrations WHERE organization_id=$1 ORDER BY provider`,[organizationId]);}
+  async deleteIntegration(organizationId,provider){
+    const rows=await this.sql.unsafe(`DELETE FROM integrations WHERE organization_id=$1 AND provider=$2 RETURNING id`,[organizationId,provider]);
+    return rows.length>0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — durable notification deliveries and immutable attempts.
+  //
+  // The claim is the only place a lease is handed out, and it is the only
+  // place that may move a row into IN_FLIGHT. `FOR UPDATE SKIP LOCKED` lets N
+  // workers claim disjoint work concurrently without blocking each other, and
+  // the lease token makes every later write idempotent and stale-writer safe.
+  // ---------------------------------------------------------------------
+  async enqueueDeliveries(records){
+    if(!records.length)return[];
+    return this.sql.begin(async(tx)=>{
+      const inserted=[];
+      for(const record of records){
+        const row=await this.#one(`INSERT INTO notification_deliveries(id,organization_id,alert_id,routing_id,escalation_job_id,provider,destination_snapshot,
+          responder_user_id,responder_name_snapshot,status,scheduled_at,attempt_count,next_attempt_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7::text::jsonb,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT DO NOTHING RETURNING *`,
+          [record.id??uid(),record.organizationId,record.alertId,record.routingId,record.escalationJobId??null,record.provider,
+           JSON.stringify(record.destinationSnapshot??{}),record.responderUserId??null,record.responderNameSnapshot??null,
+           record.status??'PENDING',record.scheduledAt??new Date().toISOString(),record.attemptCount??0,
+           record.nextAttemptAt??record.scheduledAt??new Date().toISOString()],tx);
+        if(row)inserted.push(row);
+      }
+      return inserted;
+    });
+  }
+  async listAlertDeliveries(organizationId,alertId){
+    return this.#many(`SELECT * FROM notification_deliveries WHERE organization_id=$1 AND alert_id=$2 ORDER BY created_at, id`,[organizationId,alertId]);
+  }
+  async listDeliveries(organizationId,{limit=200}={}){
+    return this.#many(`SELECT * FROM notification_deliveries WHERE organization_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2`,[organizationId,Math.max(1,Math.min(500,Number(limit)||200))]);
+  }
+  async getDelivery(organizationId,deliveryId){
+    return this.#one(`SELECT * FROM notification_deliveries WHERE organization_id=$1 AND id=$2`,[organizationId,deliveryId]);
+  }
+  async listDeliveryAttempts(organizationId,deliveryId){
+    return this.#many(`SELECT * FROM notification_attempts WHERE organization_id=$1 AND delivery_id=$2 ORDER BY attempt_number`,[organizationId,deliveryId]);
+  }
+  async listDueDeliveries(organizationId,{now:at=new Date().toISOString(),limit=200,alertId=null}={}){
+    return this.#many(`SELECT * FROM notification_deliveries d
+      WHERE d.organization_id=$1 AND ($4::text IS NULL OR d.alert_id=$4)
+        AND ((d.status IN ('PENDING','RETRYING') AND d.next_attempt_at <= $2::timestamptz)
+          OR (d.status='IN_FLIGHT' AND d.lease_expires_at IS NOT NULL AND d.lease_expires_at < $2::timestamptz))
+      ORDER BY d.next_attempt_at, d.id LIMIT $3`,[organizationId,at,Math.max(1,Math.min(500,Number(limit)||200)),alertId]);
+  }
+  /**
+   * Claim due work. The inner SELECT takes row locks with SKIP LOCKED, so
+   * concurrent workers take disjoint sets and never wait on each other; the
+   * UPDATE stamps the lease inside the same short transaction.
+   */
+  async claimDueDeliveries({now:at=new Date().toISOString(),leaseOwner,leaseSeconds=120,limit=20,alertId=null}){
+    return this.sql.begin(async(tx)=>{
+      const rows=await tx.unsafe(`
+        UPDATE notification_deliveries SET status='IN_FLIGHT', lease_owner=$1,
+          lease_expires_at=$2::timestamptz + ($3 || ' seconds')::interval, updated_at=now()
+        WHERE id IN (
+          SELECT id FROM notification_deliveries
+          WHERE ($4::text IS NULL OR alert_id=$4)
+            AND ((status IN ('PENDING','RETRYING') AND next_attempt_at <= $2::timestamptz)
+              OR (status='IN_FLIGHT' AND lease_expires_at IS NOT NULL AND lease_expires_at < $2::timestamptz))
+          ORDER BY next_attempt_at, id
+          FOR UPDATE SKIP LOCKED
+          LIMIT $5
+        ) RETURNING *`,[leaseOwner,at,String(Math.max(1,Number(leaseSeconds)||120)),alertId,Math.max(1,Math.min(200,Number(limit)||20))]);
+      return map(rows);
+    });
+  }
+  async recoverExpiredDeliveryLeases(at=new Date().toISOString(),{limit=100}={}){
+    const rows=await this.sql.unsafe(`UPDATE notification_deliveries
+      SET status=CASE WHEN attempt_count>0 THEN 'RETRYING' ELSE 'PENDING' END,
+          next_attempt_at=$1::timestamptz, lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
+      WHERE id IN (SELECT id FROM notification_deliveries
+        WHERE status='IN_FLIGHT' AND lease_expires_at IS NOT NULL AND lease_expires_at < $1::timestamptz
+        ORDER BY lease_expires_at FOR UPDATE SKIP LOCKED LIMIT $2)
+      RETURNING id`,[at,Math.max(1,Number(limit)||100)]);
+    return rows.length;
+  }
+  /**
+   * Persist the attempt and advance the lease. The `lease_owner` predicate is
+   * the guard that stops a worker whose lease already expired (and whose work
+   * was reclaimed) from writing over the new owner's outcome.
+   */
+  async completeDelivery({deliveryId,organizationId,leaseOwner,attemptNumber,startedAt,completedAt,outcome,status,nextAttemptAt=null,safeError=null,providerStatusCode=null,manualRetryByUserId=null,skipAttempt=false}){
+    return this.sql.begin(async(tx)=>{
+      const current=await this.#one(`SELECT * FROM notification_deliveries WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,deliveryId],tx);
+      if(!current)return undefined;
+      if(current.leaseOwner!==leaseOwner)return{staleLease:true,delivery:current};
+      let attempt;
+      if(!skipAttempt){
+        attempt=await this.#one(`INSERT INTO notification_attempts(id,organization_id,delivery_id,attempt_number,outcome,started_at,completed_at,safe_error,provider_status_code,manual,manual_retry_by_user_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+          [uid(),organizationId,deliveryId,attemptNumber,outcome,startedAt,completedAt,safeError?String(safeError).slice(0,900):null,
+           providerStatusCode===null||providerStatusCode===undefined?null:Number(providerStatusCode),Boolean(manualRetryByUserId),manualRetryByUserId],tx);
+      }
+      const delivery=await this.#one(`UPDATE notification_deliveries SET status=$3,attempt_count=$4,last_attempt_at=$5,next_attempt_at=$6,
+        completed_at=$7,last_error=$8,lease_owner=NULL,lease_expires_at=NULL,manual_retry_by_user_id=NULL,updated_at=now()
+        WHERE organization_id=$1 AND id=$2 RETURNING *`,
+        [organizationId,deliveryId,status,skipAttempt?current.attemptCount:attemptNumber,
+         skipAttempt?current.lastAttemptAt:completedAt,nextAttemptAt??completedAt,
+         ['SENT','FAILED','CANCELLED'].includes(status)?completedAt:null,
+         safeError?String(safeError).slice(0,900):(status==='SENT'?null:current.lastError)],tx);
+      return{staleLease:false,delivery,attempt};
+    });
+  }
+  /** Manual retry keeps every earlier attempt and records who asked for it. */
+  async scheduleManualRetry({organizationId,deliveryId,userId,now:at=new Date().toISOString()}){
+    return this.#one(`UPDATE notification_deliveries SET status='RETRYING',next_attempt_at=$3::timestamptz,
+      manual_retry_by_user_id=$4,lease_owner=NULL,lease_expires_at=NULL,completed_at=NULL,updated_at=now()
+      WHERE organization_id=$1 AND id=$2 AND status NOT IN ('SENT','CANCELLED') RETURNING *`,[organizationId,deliveryId,at,userId]);
+  }
+  async claimDueEscalationJobs({now:at=new Date().toISOString(),leaseOwner,leaseSeconds=120,limit=20}){
+    return this.sql.begin(async(tx)=>{
+      const rows=await tx.unsafe(`UPDATE escalation_jobs SET state='IN_FLIGHT', lease_owner=$1, claimed_at=$2::timestamptz,
+        lease_expires_at=$2::timestamptz + ($3 || ' seconds')::interval, updated_at=now()
+        WHERE id IN (
+          SELECT id FROM escalation_jobs
+          WHERE (state='PENDING' AND due_at <= $2::timestamptz)
+             OR (state='IN_FLIGHT' AND lease_expires_at IS NOT NULL AND lease_expires_at < $2::timestamptz)
+          ORDER BY due_at, id FOR UPDATE SKIP LOCKED LIMIT $4
+        ) RETURNING *`,[leaseOwner,at,String(Math.max(1,Number(leaseSeconds)||120)),Math.max(1,Math.min(200,Number(limit)||20))]);
+      return map(rows);
+    });
+  }
+  async recoverExpiredEscalationLeases(at=new Date().toISOString(),{limit=100}={}){
+    const rows=await this.sql.unsafe(`UPDATE escalation_jobs SET state='PENDING', lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
+      WHERE id IN (SELECT id FROM escalation_jobs
+        WHERE state='IN_FLIGHT' AND lease_expires_at IS NOT NULL AND lease_expires_at < $1::timestamptz
+        ORDER BY lease_expires_at FOR UPDATE SKIP LOCKED LIMIT $2)
+      RETURNING id`,[at,Math.max(1,Number(limit)||100)]);
+    return rows.length;
+  }
+  /**
+   * Finish a claimed escalation step.
+   *
+   * The routing row is locked FIRST and re-read inside this transaction. An
+   * acknowledgement also locks that row, so the two orderings are strictly
+   * serialized: whichever commits first is observed by the other, and Relay can
+   * never create a new page after it has transactionally observed the alert as
+   * acknowledged.
+   */
+  async completeEscalationJob({organizationId,jobId,leaseOwner,state,responderUserId=null,responderNameSnapshot=null,result={},deliveries=[]}){
+    return this.sql.begin(async(tx)=>{
+      const job=await this.#one(`SELECT * FROM escalation_jobs WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,jobId],tx);
+      if(!job)return undefined;
+      if(job.leaseOwner!==leaseOwner)return{staleLease:true,job};
+      const routing=await this.#one(`SELECT * FROM alert_routings WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,job.routingId],tx);
+      if(routing?.acknowledgedAt&&state!=='CANCELLED_ACKNOWLEDGED'&&state!=='FAILED'){
+        state='CANCELLED_ACKNOWLEDGED';
+        result={...result,reason:'ACKNOWLEDGED',acknowledgedAt:routing.acknowledgedAt};
+        deliveries=[];responderUserId=null;responderNameSnapshot=null;
+      }
+      if(state==='CANCELLED_ACKNOWLEDGED')deliveries=[];
+      const inserted=[];
+      for(const record of deliveries){
+        const row=await this.#one(`INSERT INTO notification_deliveries(id,organization_id,alert_id,routing_id,escalation_job_id,provider,destination_snapshot,
+          responder_user_id,responder_name_snapshot,status,scheduled_at,attempt_count,next_attempt_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7::text::jsonb,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT DO NOTHING RETURNING id`,
+          [record.id??uid(),record.organizationId,record.alertId,record.routingId,record.escalationJobId??jobId,record.provider,
+           JSON.stringify(record.destinationSnapshot??{}),record.responderUserId??null,record.responderNameSnapshot??null,
+           record.status??'PENDING',record.scheduledAt??new Date().toISOString(),record.attemptCount??0,
+           record.nextAttemptAt??record.scheduledAt??new Date().toISOString()],tx);
+        if(row)inserted.push(row.id);
+      }
+      const updated=await this.#one(`UPDATE escalation_jobs SET state=$3,resolved_responder_user_id=$4,resolved_responder_name_snapshot=$5,
+        result=$6::text::jsonb, executed_at=CASE WHEN $3='COMPLETED' THEN now() ELSE executed_at END,
+        lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+        WHERE organization_id=$1 AND id=$2 RETURNING *`,
+        [organizationId,jobId,state,responderUserId,responderNameSnapshot,JSON.stringify({...result,deliveryCount:inserted.length})],tx);
+      return{staleLease:false,job:updated};
+    });
+  }
 }

@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELAY_VERSION } from '../packages/shared/version.mjs';
+import { ATTEMPT_OUTCOMES, DELIVERY_STATES, NOTIFICATION_CHANNELS } from '../packages/shared/escalation.mjs';
 
 const baseUrl = (process.env.RELAY_VERIFY_BASE_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '');
 
@@ -41,13 +42,22 @@ const requiredPaths = [
   '/organizations/{organizationId}/alerts/{alertId}/incidents',
   '/organizations/{organizationId}/routings',
   '/organizations/{organizationId}/discord-identities',
-  '/organizations/{organizationId}/discord-identities/{userId}'
+  '/organizations/{organizationId}/discord-identities/{userId}',
+  '/organizations/{organizationId}/integrations/slack',
+  '/organizations/{organizationId}/integrations/smtp',
+  '/organizations/{organizationId}/alerts/{alertId}/deliveries',
+  '/organizations/{organizationId}/alerts/{alertId}/escalation',
+  '/organizations/{organizationId}/deliveries/{deliveryId}',
+  '/organizations/{organizationId}/deliveries/{deliveryId}/retry'
 ];
 
-const requiredSchemas = ['AlertIntake', 'AlertRouting', 'ScheduleInput', 'OverrideInput', 'RoutingRuleInput', 'EscalationPolicyInput'];
+const requiredSchemas = ['AlertIntake', 'AlertRouting', 'ScheduleInput', 'OverrideInput', 'RoutingRuleInput', 'EscalationPolicyInput', 'NotificationDelivery', 'DeliveryAttempt', 'AlertEscalationState', 'SlackIntegrationInput', 'SmtpIntegrationInput'];
 
 /** Routes the shipped SPA must handle for the Relay 0.2 surfaces. */
-const requiredUiRoutes = ['/app/alerts', '/app/oncall', '/app/teams', '/app/routing'];
+const requiredUiRoutes = ['/app/alerts', '/app/oncall', '/app/teams', '/app/routing', '/app/escalations', '/app/settings'];
+
+/** Browser-facing hooks the operator flows depend on. */
+const requiredBundleHooks = ['data-delivery-retry', 'data-escalation-step', 'data-integration-slack', 'data-integration-smtp', 'notification-channels'];
 
 /** Strings that must never appear in a shipped asset or a public response. */
 const forbiddenInBundle = ['discord.com/api/webhooks/1', 'INTEGRATION_ENCRYPTION_KEY=', 'x-relay-alert-key: relay'];
@@ -86,9 +96,31 @@ assert.deepEqual(
   ['FAILED', 'NOT_ATTEMPTED', 'SENT', 'SKIPPED_DISABLED', 'SKIPPED_NO_INTEGRATION', 'SKIPPED_NO_RESPONDER'],
   'the documented notification statuses must match the database CHECK constraint'
 );
+assert.deepEqual(
+  spec.components.schemas.NotificationDelivery.properties.status.enum.slice().sort(),
+  [...DELIVERY_STATES].sort(),
+  'the documented delivery statuses must match the persisted state machine'
+);
+assert.deepEqual(
+  spec.components.schemas.NotificationDelivery.properties.provider.enum.slice().sort(),
+  [...NOTIFICATION_CHANNELS].sort(),
+  'the documented delivery providers must match the supported notification channels'
+);
+assert.deepEqual(
+  spec.components.schemas.DeliveryAttempt.properties.outcome.enum.slice().sort(),
+  [...ATTEMPT_OUTCOMES].sort(),
+  'the documented attempt outcomes must match the shared classification'
+);
+assert.deepEqual(
+  spec.components.schemas.RoutingRuleInput.properties.notificationChannels.items.enum.slice().sort(),
+  [...NOTIFICATION_CHANNELS].sort(),
+  'the documented routing channels must match the supported notification channels'
+);
 
 const bundle = await getText('/app.js');
 for (const route of requiredUiRoutes) assert.ok(bundle.includes(route), `the shipped SPA must handle ${route}`);
+for (const hook of requiredBundleHooks) assert.ok(bundle.includes(hook), `the shipped SPA must expose ${hook}`);
+assert.ok(bundle.includes('/app/alerts/'), 'the shipped SPA must handle the alert detail deep link');
 for (const forbidden of forbiddenInBundle) assert.equal(bundle.includes(forbidden), false, `the shipped bundle must not contain ${forbidden}`);
 
 const styles = await getText('/styles.css');
@@ -103,4 +135,4 @@ for (const internal of ['oncall', 'schedule', 'rotation', 'responder', 'routing'
   assert.equal(publicBody.toLowerCase().includes(internal), false, `the public 404 body must not mention ${internal}`);
 }
 
-console.log(`Release surface PASS: Relay ${RELAY_VERSION} — health, package.json and OpenAPI agree; ${requiredPaths.length} documented 0.2 paths; ${requiredSchemas.length} schemas; ${requiredUiRoutes.length} SPA routes; no secrets in shipped assets.`);
+console.log(`Release surface PASS: Relay ${RELAY_VERSION} — health, package.json and OpenAPI agree; ${requiredPaths.length} documented 0.2 paths; ${requiredSchemas.length} schemas; ${requiredUiRoutes.length} SPA routes; ${requiredBundleHooks.length} operator hooks; no secrets in shipped assets.`);
