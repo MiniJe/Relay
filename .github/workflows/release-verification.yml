@@ -107,9 +107,12 @@ jobs:
           RELAY_BROWSER: /usr/bin/google-chrome
           RELAY_BROWSER_SCREENSHOT_DIR: /tmp/relay-browser-smoke
         run: |
-          set -o pipefail
-          npm run verify:browser 2>&1 | tee /tmp/relay-browser-smoke.log
-          grep -E '^(FAIL|Browser smoke crashed)' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' || true
+          set +e
+          npm run verify:browser > /tmp/relay-browser-smoke.log 2>&1
+          code=$?
+          grep -E '^FAIL' /tmp/relay-browser-smoke.log | sed 's/^/::error::/' | head -10
+          tail -c 3200 /tmp/relay-browser-smoke.log | tr '\n' '~' | sed 's/^/::error::smoke-tail| /'
+          exit $code
 
       - name: Production PostgreSQL-backed E2E
         run: npm run verify:production
