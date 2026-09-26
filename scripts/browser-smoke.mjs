@@ -646,7 +646,7 @@ async function main() {
           firstPosition: (box?.querySelector('.rotation-pos')?.textContent ?? '').trim(),
           inScheduleTimeZone: text.includes('Europe/Bucharest'),
           listsOverride: text.includes('Smoke override ${marker}'),
-          overrideWindowsLabeled: /UTC[+-]|Europe\/Bucharest/.test(text),
+          overrideWindowsLabeled: text.includes('UTC') || text.includes('Europe/Bucharest'),
           deleteOverride: !!box?.querySelector('[data-delete-override]')
         };
       })()`);
@@ -744,7 +744,7 @@ async function main() {
             for (const el of document.querySelectorAll('body *')) {
               const rect = el.getBoundingClientRect();
               if (rect.right > cw + 1) {
-                offenders.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : '') + ' right=' + Math.round(rect.right) + ' w=' + Math.round(rect.width) + ' ' + JSON.stringify((el.textContent || '').trim().slice(0, 28)));
+                offenders.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(' ').filter(Boolean).join('.') : '') + ' right=' + Math.round(rect.right) + ' w=' + Math.round(rect.width) + ' ' + JSON.stringify((el.textContent || '').trim().slice(0, 28)));
               }
             }
             return { delta, offenders: offenders.slice(0, 6) };
