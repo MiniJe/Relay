@@ -1,6 +1,6 @@
 // Dependency-free hosted-Chrome browser qualification for the standalone website.
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, appendFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -130,5 +130,5 @@ async function main() {
   await log('console/runtime',async () => assert(errors.length === 0,errors.join('; ')));
   console.log(`PASS screenshots: ${shots}`);
 }
-try { await main(); } catch(e) { console.error(`FAIL ${e.stack || e.message}`); console.error(`::error::Website browser qualification: ${String(e.message).replaceAll('\n',' ')}`); process.exitCode = 1; }
+try { await main(); } catch(e) { console.error(`FAIL ${e.stack || e.message}`); console.error(`::error::Website browser qualification: ${String(e.message).replaceAll('\n',' ')}`); if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY,`Website browser failure: ${e.stack || e.message}\n`); process.exitCode = 1; }
 finally { ws?.close(); browser?.kill(); server?.kill(); if(profile) await rm(profile,{recursive:true,force:true}); }
