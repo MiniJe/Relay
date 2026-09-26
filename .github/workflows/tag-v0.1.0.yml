@@ -22,18 +22,19 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Create v0.1.0
+      - name: Guard the historical v0.1.0 tag
         shell: bash
-        env:
-          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           git fetch --tags --force
-          if git rev-parse -q --verify refs/tags/v0.1.0 >/dev/null; then
-            test "$(git rev-list -n 1 v0.1.0)" = "$VERIFIED_SHA"
-            exit 0
+          if ! git rev-parse -q --verify refs/tags/v0.1.0 >/dev/null; then
+            echo "v0.1.0 is missing; it must not be recreated outside the original release flow."
+            exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a v0.1.0 "$VERIFIED_SHA" -m "Relay 0.1.0"
-          git push origin refs/tags/v0.1.0
+          PINNED=4dc0b63b3c5eb13d9c4c0d73b4355ec65b1a2c4c
+          actual="$(git rev-list -n 1 v0.1.0)"
+          if [ "$actual" != "$PINNED" ]; then
+            echo "v0.1.0 moved: resolves to $actual but must stay pinned to $PINNED."
+            exit 1
+          fi
+          echo "v0.1.0 remains pinned to the verified Relay 0.1 commit $PINNED; main may advance independently."
