@@ -117,5 +117,5 @@ async function main() {
   await log('console/runtime',async () => assert(errors.length === 0,errors.join('; ')));
   console.log(`PASS screenshots: ${shots}`);
 }
-try { await main(); } catch(e) { console.error(`FAIL ${e.message}`); process.exitCode = 1; }
+try { await main(); } catch(e) { console.error(`FAIL ${e.stack || e.message}`); console.error(`::error::Website browser qualification: ${String(e.message).replaceAll('\n',' ')}`); process.exitCode = 1; }
 finally { ws?.close(); browser?.kill(); server?.kill(); if(profile) await rm(profile,{recursive:true,force:true}); }
