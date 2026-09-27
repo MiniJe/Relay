@@ -1,6 +1,21 @@
-# Relay 0.1
+# Relay 0.2
 
-Relay is an open-source incident operations and public status platform. Release 0.1 proves one canonical incident lifecycle from declaration through coordination, public communication, resolution, and postmortem.
+Relay is an open-source incident operations and public status platform. Release 0.1 proved one canonical incident lifecycle from declaration through coordination, public communication, resolution, and postmortem. Release 0.2 adds the layer upstream of the incident: **alert routing and an on-call foundation** that answers "who is responsible right now?" deterministically.
+
+## What works in 0.2
+
+Alert routing and on-call (see [`docs/ONCALL.md`](docs/ONCALL.md)):
+
+- Responder teams with organization-scoped membership, and Services owned by a team.
+- On-call schedules with an IANA timezone, an ordered rotation and fixed-duration handoffs expressed in minutes.
+- Deterministic resolution of "who is on call at instant T" for any T, computed from absolute UTC instants so the server's timezone can never change the answer.
+- Overrides: a named replacement responder for a window, with the rotation resuming unchanged afterwards and overlaps rejected.
+- Routing rules matching service, source and severity, resolved by explicit priority with total tie-breaks. First match wins; rules are data, never code.
+- An immutable routing record per alert capturing the matched rule, schedule, team, resolved responder, notification outcome and acknowledgement — with names snapshotted so history never drifts.
+- Discord as the first notification channel, mentioning the mapped responder and sanitized against forged mentions.
+- Alert acknowledgement by authorized responders: first wins, repeats are idempotent, and acknowledging is never the same as resolving an incident.
+- Explicit human escalation from an alert to a canonical incident. Relay never declares an incident automatically.
+- Operator surfaces for Alerts, Teams, On-call and Routing in the existing Quiet Operations style.
 
 ## What works in 0.1
 
@@ -64,14 +79,17 @@ npm run seed               # seed local development data
 npm run check:secrets      # scan repository text for common credential patterns
 npm run verify:production  # production PostgreSQL-backed lifecycle verifier
 npm run verify:restart     # persistence verifier after Relay restart
+npm run verify:migration   # 0.1 -> 0.2 upgrade contract on a populated database
+npm run verify:surface     # deployed version/OpenAPI/UI-surface consistency
+npm run verify:browser     # real-browser boot, keyboard, responsive and routing pass
 npm run verify             # build + tests + secret scan
 ```
 
 ## Release verification
 
-The official repository includes `.github/workflows/release-verification.yml`. On pushes to `main`, it performs clean lockfile installation, a fresh PostgreSQL 16 migration and schema contract, the full automated suite, secret scanning, an actual Docker Compose image/startup check, health/UI/API checks, the PostgreSQL-backed production lifecycle in `scripts/production-e2e.mjs`, a Relay container restart, and persisted-state verification.
+The official repository includes `.github/workflows/release-verification.yml`. On pushes to `main` and on pull requests, it performs clean lockfile installation, a fresh PostgreSQL 16 migration and schema contract, the full automated suite, the 0.1 → 0.2 migration upgrade contract, the timezone-pinned on-call determinism contract, secret scanning, an actual Docker Compose image/startup check, health/UI/API and release-surface checks, a real-browser qualification pass, the PostgreSQL-backed production lifecycle in `scripts/production-e2e.mjs`, a Relay container restart, and persisted-state verification including routing records, schedules and acknowledgements.
 
-A `v0.1.0` tag should reference only the exact commit whose `release-verification` workflow completed successfully.
+The `v0.1.0` tag is immutable and references only the exact commit whose `release-verification` workflow completed successfully. Relay 0.2 is **not** tagged: `v0.2.0` is published only when the Founder decides the release is closed.
 
 ## Alert intake example
 
@@ -92,11 +110,27 @@ curl -X POST http://localhost:4000/api/v1/alerts \
   }'
 ```
 
-Incoming alerts are persisted durably and idempotent on `(organization, source, externalId)` when `externalId` is supplied. Relay 0.1 does not automatically create an incident for every alert.
+Incoming alerts are persisted durably and idempotent on `(organization, source, externalId)` when `externalId` is supplied.
+
+Since 0.2 the same request also runs the routing pipeline: rules are evaluated in deterministic order, the target schedule is resolved, the responder on call **at the routing instant** is selected, an immutable routing record is written and the first notification channel is attempted. The alert and its `PENDING` routing record are committed *before* any of that runs, so a routing misconfiguration or a Discord outage can never lose an alert. A replayed `externalId` reuses the original record and never pages a responder twice.
+
+The response includes the routing decision:
+
+```json
+{"data":{"id":"…","duplicate":false,"routing":{"resolution":"ROUTED","ruleName":"Checkout criticals","scheduleName":"Primary on-call","oncallDisplayName":"Ada Lovelace","notificationStatus":"SENT","acknowledgedAt":null}}}
+```
+
+Relay does not automatically create an incident for every alert. Escalation is an explicit human action:
+
+```bash
+curl -X POST http://localhost:4000/api/v1/organizations/<orgId>/alerts/<alertId>/incidents \
+  -H 'content-type: application/json' -b '<session cookie>' \
+  -d '{"title":"Checkout latency breach","severity":"SEV2"}'
+```
 
 ## Architecture
 
-Relay 0.1 is a modular monolith with two logical application surfaces:
+Relay is a modular monolith with two logical application surfaces:
 
 ```text
 Browser / API client
@@ -119,7 +153,9 @@ See:
 - `docs/DEVELOPMENT.md`
 - `docs/API.md`
 - `docs/SECURITY.md`
+- `docs/ONCALL.md`
 - `docs/RELAY-0.1.md`
+- `docs/RELAY-0.2.md`
 
 ## License
 

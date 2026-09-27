@@ -532,17 +532,226 @@ async function main() {
       const publicShot = await page.screenshot(`status-page-desktop`);
       if (publicShot) console.log(`      screenshot: ${publicShot}`);
 
+      // ------------------------------------------------------------------
+      // Relay 0.2: alerts, on-call, teams and routing configuration
+      // ------------------------------------------------------------------
+      console.log('\n[relay-0.2] alert routing and on-call surfaces');
+      const alertKey = process.env.ALERT_INGEST_KEY ?? '';
+      const provisioned02 = await page.evaluate(`(async () => {
+        const orgId = localStorage.getItem('relay.orgId');
+        const grab = async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) });
+        const call = (path, body, method) => fetch('/api/v1/organizations/' + orgId + path, { method: method ?? (body === undefined ? 'GET' : 'POST'), headers: body === undefined ? {} : { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }).then(grab);
+        const me = await fetch('/api/v1/me').then((r) => r.json());
+        const org = await call('');
+        const team = await call('/teams', { name: 'Smoke Responder Team ${marker}', description: 'browser smoke team' });
+        const teamId = team.body?.data?.id ?? null;
+        const member = teamId ? await call('/teams/' + teamId + '/members', { userId: me.data.user.id }) : { status: 0 };
+        const services = await call('/services');
+        const serviceId = services.body?.data?.[0]?.id ?? null;
+        const owned = serviceId && teamId ? await call('/services/' + serviceId, { ownerTeamId: teamId }, 'PATCH') : { status: 0 };
+        const schedule = teamId ? await call('/oncall/schedules', {
+          name: 'Smoke on-call ${marker}', teamId, timeZone: 'Europe/Bucharest',
+          rotationStartsAt: new Date(Date.now() - 3600000).toISOString(),
+          rotationIntervalMinutes: 1440, participantUserIds: [me.data.user.id]
+        }) : { status: 0 };
+        const scheduleId = schedule.body?.data?.id ?? null;
+        const badTz = teamId ? await call('/oncall/schedules', { name: 'Bad tz', teamId, timeZone: 'Not/AZone', rotationStartsAt: new Date().toISOString(), rotationIntervalMinutes: 1440, participantUserIds: [me.data.user.id] }) : { status: 0 };
+        const rule = scheduleId ? await call('/routing-rules', { name: 'Smoke criticals ${marker}', priority: 10, matchSource: 'browser-smoke', matchSeverities: ['critical'], targetScheduleId: scheduleId }) : { status: 0 };
+        const override = scheduleId ? await call('/oncall/schedules/' + scheduleId + '/overrides', {
+          replacementUserId: me.data.user.id,
+          startsAt: new Date(Date.now() + 86400000).toISOString(),
+          endsAt: new Date(Date.now() + 90000000).toISOString(),
+          reason: 'Smoke override ${marker}'
+        }) : { status: 0 };
+        const overlapping = scheduleId ? await call('/oncall/schedules/' + scheduleId + '/overrides', {
+          replacementUserId: me.data.user.id,
+          startsAt: new Date(Date.now() + 87000000).toISOString(),
+          endsAt: new Date(Date.now() + 91000000).toISOString(),
+          reason: 'Smoke clash'
+        }) : { status: 0 };
+        const state = await call('/oncall/state');
+        return {
+          override: override.status,
+          overlapStatus: overlapping.status,
+          overlapCode: overlapping.body?.error?.code ?? null,
+          orgSlug: org.body?.data?.slug ?? null,
+          displayName: me.data?.user?.displayName ?? null,
+          team: team.status, member: member.status, owned: owned.status,
+          schedule: schedule.status, scheduleId, badTzStatus: badTz.status, badTzCode: badTz.body?.error?.code ?? null,
+          rule: rule.status,
+          resolvedUserId: state.body?.data?.oncall?.[0]?.current?.userId ?? null,
+          meId: me.data?.user?.id ?? null,
+          timeZone: state.body?.data?.oncall?.[0]?.schedule?.timeZone ?? null
+        };
+      })()`);
+      check('operator can provision team, membership, schedule, override and routing rule via API', provisioned02.team === 201 && provisioned02.member === 201 && provisioned02.owned === 200 && provisioned02.schedule === 201 && provisioned02.override === 201 && provisioned02.rule === 201, JSON.stringify(provisioned02));
+      check('an overlapping override is refused deterministically', provisioned02.overlapStatus === 409 && provisioned02.overlapCode === 'OVERRIDE_OVERLAP', `status ${provisioned02.overlapStatus} code ${provisioned02.overlapCode}`);
+      check('a malformed schedule timezone is rejected before it reaches the UI', provisioned02.badTzStatus === 400 && provisioned02.badTzCode === 'INVALID_TIMEZONE', `status ${provisioned02.badTzStatus} code ${provisioned02.badTzCode}`);
+      check('on-call state resolves a responder server-side', provisioned02.resolvedUserId === provisioned02.meId, `resolved ${provisioned02.resolvedUserId} vs me ${provisioned02.meId}`);
+      check('on-call state reports the schedule IANA timezone', provisioned02.timeZone === 'Europe/Bucharest', String(provisioned02.timeZone));
+
+      let routedAlertTitle = '';
+      if (alertKey && provisioned02.orgSlug) {
+        routedAlertTitle = `Smoke routed alert ${marker}`;
+        const ingested = await page.evaluate(`(async () => {
+          const body = { organizationSlug: ${JSON.stringify(provisioned02.orgSlug)}, source: 'browser-smoke', externalId: 'smoke-${marker}', title: ${JSON.stringify(routedAlertTitle)}, description: 'browser smoke routing', severity: 'critical' };
+          const r = await fetch('/api/v1/alerts', { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-alert-key': ${JSON.stringify(alertKey)} }, body: JSON.stringify(body) });
+          const j = await r.json().catch(() => ({}));
+          return { status: r.status, resolution: j?.data?.routing?.resolution ?? null, responder: j?.data?.routing?.oncallDisplayName ?? null, team: j?.data?.routing?.teamName ?? null, keyEchoed: JSON.stringify(j).includes(${JSON.stringify(alertKey)}) };
+        })()`);
+        check('alert ingested through the keyed endpoint is routed to the on-call responder', ingested.status === 202 && ingested.resolution === 'ROUTED' && ingested.responder === provisioned02.displayName, JSON.stringify(ingested));
+        check('the routing response never echoes the ingest key', ingested.keyEchoed === false);
+      } else {
+        console.log('      note: ALERT_INGEST_KEY unavailable, so the routed-alert table pass is skipped');
+      }
+
+      // Provisioning deliberately provokes a 400 (malformed timezone) and a 409
+      // (overlapping override). Those rejections are the point of the checks
+      // above, but the browser still reports them as failed resources, so drain
+      // them here and confirm nothing else was logged.
+      const rejectionNoise = page.problems(page.take());
+      check('the only network noise from provisioning is the two deliberate rejections', rejectionNoise.length <= 2 && rejectionNoise.every((p) => /40[09]/.test(p)), rejectionNoise.join(' | '));
+
+      await page.goto(`${baseUrl}/app/oncall`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.content h1')` });
+      const oncallView = await page.evaluate(`(() => {
+        const text = document.querySelector('.content').textContent;
+        return {
+          heading: (document.querySelector('.content h1')?.textContent ?? '').trim(),
+          namesResponder: text.includes(${JSON.stringify('Browser Smoke')}),
+          showsTimeZone: text.includes('Europe/Bucharest') || /UTC[+-]/.test(text),
+          showsHandoff: /next handoff/i.test(text),
+          hero: !!document.querySelector('.oncall-hero'),
+          schedulesTable: document.querySelectorAll('.table-wrap tbody tr').length,
+          detailAction: !!document.querySelector('[data-schedule-detail]'),
+          overrideAction: !!document.querySelector('[data-add-override]'),
+          toggleAction: !!document.querySelector('[data-toggle-schedule]')
+        };
+      })()`);
+      check('on-call view answers "who is on call now" with a named responder', oncallView.namesResponder === true, JSON.stringify(oncallView));
+      check('on-call view renders handoff times in the schedule timezone, not server-local time', oncallView.showsTimeZone === true, JSON.stringify(oncallView));
+      check('on-call view surfaces the next handoff', oncallView.showsHandoff === true, JSON.stringify(oncallView));
+      check('on-call view renders its hero and one row per schedule', oncallView.hero === true && oncallView.schedulesTable >= 1, JSON.stringify(oncallView));
+      check('on-call view exposes rotation detail, override and enable/disable actions', oncallView.detailAction === true && oncallView.overrideAction === true && oncallView.toggleAction === true, JSON.stringify(oncallView));
+
+      // Progressive disclosure: opening a schedule loads its ordered rotation and
+      // its full override table on demand.
+      await page.evaluate(`document.querySelector('[data-schedule-detail]').click()`);
+      const rotationLoaded = await page.waitForCondition(`!!document.querySelector('#schedule-detail-section .rotation-list')`, 15_000);
+      check('opening a schedule loads its ordered rotation', rotationLoaded === true);
+      const rotationDetail = await page.evaluate(`(() => {
+        const box = document.querySelector('#schedule-detail-section');
+        const text = box?.textContent ?? '';
+        return {
+          participants: box?.querySelectorAll('.rotation-list li').length ?? 0,
+          firstPosition: (box?.querySelector('.rotation-pos')?.textContent ?? '').trim(),
+          inScheduleTimeZone: text.includes('Europe/Bucharest'),
+          listsOverride: text.includes('Smoke override ${marker}'),
+          overrideWindowsLabeled: text.includes('UTC') || text.includes('Europe/Bucharest'),
+          deleteOverride: !!box?.querySelector('[data-delete-override]')
+        };
+      })()`);
+      check('rotation detail lists participants in configured order', rotationDetail.participants >= 1 && rotationDetail.firstPosition === '1', JSON.stringify(rotationDetail));
+      check('rotation detail renders in the schedule timezone', rotationDetail.inScheduleTimeZone === true, JSON.stringify(rotationDetail));
+      check('rotation detail lists the schedule override with its reason', rotationDetail.listsOverride === true, JSON.stringify(rotationDetail));
+      check('rotation detail offers override deletion to an OWNER', rotationDetail.deleteOverride === true, JSON.stringify(rotationDetail));
+      const oncallProblems = page.problems(page.take());
+      check('on-call view free of console/exception/MIME/request failures', oncallProblems.length === 0, oncallProblems.join(' | '));
+      const oncallShot = await page.screenshot('oncall-desktop');
+      if (oncallShot) console.log(`      screenshot: ${oncallShot}`);
+
+      await page.goto(`${baseUrl}/app/teams`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.content h1')` });
+      const teamsView = await page.evaluate(`(() => {
+        const text = document.querySelector('.content').textContent;
+        return { listsTeam: text.includes('Smoke Responder Team ${marker}'), memberList: !!document.querySelector('.member-list'), form: !!document.querySelector('#team-name') };
+      })()`);
+      check('teams view lists the team and its roster', teamsView.listsTeam === true && teamsView.memberList === true, JSON.stringify(teamsView));
+      check('teams view exposes the create-team form to an OWNER', teamsView.form === true);
+      const teamsProblems = page.problems(page.take());
+      check('teams view free of console/exception/MIME/request failures', teamsProblems.length === 0, teamsProblems.join(' | '));
+
+      await page.goto(`${baseUrl}/app/routing`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('#rule-form')` });
+      const routingView = await page.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('.table-wrap tbody tr')];
+        return {
+          listsRule: document.querySelector('.content').textContent.includes('Smoke criticals ${marker}'),
+          rowCount: rows.length,
+          firstRowPriority: (rows[0]?.textContent ?? '').trim().slice(0, 40),
+          form: ['rule-name', 'rule-priority', 'rule-service', 'rule-source', 'rule-severities', 'rule-target'].every((id) => !!document.getElementById(id))
+        };
+      })()`);
+      check('routing view lists configured rules', routingView.listsRule === true, JSON.stringify(routingView));
+      check('routing rule form exposes name, priority, conditions and target', routingView.form === true);
+      const routingProblems = page.problems(page.take());
+      check('routing view free of console/exception/MIME/request failures', routingProblems.length === 0, routingProblems.join(' | '));
+
+      await page.goto(`${baseUrl}/app/alerts`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.summary-strip')` });
+      const alertsView = await page.evaluate(`(() => {
+        const text = document.querySelector('.content').textContent;
+        const strip = [...document.querySelectorAll('.summary-strip .summary-label')].map((e) => e.textContent.trim());
+        return {
+          strip,
+          scrollableTable: !!document.querySelector('.table-wrap.table-scroll-x'),
+          showsRoutedAlert: text.includes(${JSON.stringify('Smoke routed alert')}),
+          showsRoutingPath: /→/.test(text),
+          showsResponder: text.includes(${JSON.stringify('Browser Smoke')}),
+          ackButton: !!document.querySelector('[data-ack]'),
+          escalateButton: !!document.querySelector('[data-escalate]')
+        };
+      })()`);
+      check('alerts view reports routed, unacknowledged and failed-delivery counts', alertsView.strip.length === 4 && alertsView.strip.includes('Routed') && alertsView.strip.includes('Unacknowledged') && alertsView.strip.includes('Delivery failed'), JSON.stringify(alertsView.strip));
+      check('alerts table scrolls horizontally inside its wrapper rather than the page', alertsView.scrollableTable === true);
+      if (alertKey) {
+        check('alerts table shows the routed alert, its routing path and its responder', alertsView.showsRoutedAlert === true && alertsView.showsRoutingPath === true && alertsView.showsResponder === true, JSON.stringify(alertsView));
+        check('alerts table exposes acknowledge and escalate actions to a responder', alertsView.ackButton === true && alertsView.escalateButton === true);
+        if (alertsView.ackButton) {
+          await page.evaluate(`document.querySelector('[data-ack]').click()`);
+          const acked = await page.waitForCondition(`!document.querySelector('[data-ack]') && document.querySelector('.content').textContent.includes('Acknowledged')`, 15_000);
+          check('acknowledging from the alerts table updates the row without a reload', acked === true);
+        }
+      }
+      const alertsProblems = page.problems(page.take());
+      check('alerts view free of console/exception/MIME/request failures', alertsProblems.length === 0, alertsProblems.join(' | '));
+      const alertsShot = await page.screenshot('alerts-desktop');
+      if (alertsShot) console.log(`      screenshot: ${alertsShot}`);
+
+      // The sidebar must expose every 0.2 surface by name, not by icon alone.
+      const nav = await page.evaluate(`[...document.querySelectorAll('.sidebar .nav a')].map((a) => ({ href: a.getAttribute('href'), label: a.textContent.trim() }))`);
+      const navLabels = nav.map((n) => n.label.replace(/^[^A-Za-z]*/, ''));
+      for (const [href, label] of [['/app/alerts', 'Alerts'], ['/app/oncall', 'On-call'], ['/app/teams', 'Teams'], ['/app/routing', 'Routing']]) {
+        check(`sidebar exposes ${label} at ${href}`, nav.some((n) => n.href === href && n.label.includes(label)), JSON.stringify(navLabels));
+      }
+
+      // Deep links to the new routes must survive a full page load.
+      for (const route of ['/app/alerts', '/app/oncall', '/app/teams', '/app/routing']) {
+        await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell') && !!document.querySelector('.content h1')` });
+        const deep = await page.evaluate(`({ path: location.pathname, heading: (document.querySelector('.content h1')?.textContent ?? '').trim(), active: document.querySelector('.sidebar .nav a.active')?.getAttribute('href') ?? null })`);
+        check(`deep link ${route} renders its own view`, deep.path === route && deep.heading.length > 0 && deep.active === route, JSON.stringify(deep));
+      }
+
       // Operator routes must hold at both representative viewports.
       const dashOverflow = {};
       for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
         await page.setViewport(viewport);
         await page.waitForCondition(`document.documentElement.clientWidth <= ${viewport.width}`);
         await page.goto(`${baseUrl}/app`, { waitFor: `!!document.querySelector('.app-shell')` });
-        for (const route of ['/app', '/app/incidents', '/app/services', '/app/components', '/app/status-pages']) {
+        for (const route of ['/app', '/app/alerts', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages']) {
           if (route !== '/app') await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell')` });
-          const delta = await page.evaluate(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
+          const measured = await page.evaluate(`(() => {
+            const cw = document.documentElement.clientWidth;
+            const delta = document.documentElement.scrollWidth - cw;
+            if (delta <= 1) return { delta };
+            const offenders = [];
+            for (const el of document.querySelectorAll('body *')) {
+              const rect = el.getBoundingClientRect();
+              if (rect.right > cw + 1) {
+                offenders.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(' ').filter(Boolean).join('.') : '') + ' right=' + Math.round(rect.right) + ' w=' + Math.round(rect.width) + ' ' + JSON.stringify((el.textContent || '').trim().slice(0, 28)));
+              }
+            }
+            return { delta, offenders: offenders.slice(0, 6) };
+          })()`);
+          const delta = measured.delta;
           dashOverflow[`${viewport.label} ${route}`] = delta;
-          check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px`);
+          check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px past a ${await page.evaluate('document.documentElement.clientWidth')}px viewport; offenders: ${(measured.offenders ?? []).join(' , ') || 'none identified'}`);
         }
         const file = await page.screenshot(`dashboard-${viewport.label}`);
         if (file) console.log(`      screenshot: ${file}`);
@@ -565,7 +774,7 @@ async function main() {
       for (const failure of failures) console.log(`  - ${failure}`);
       process.exitCode = 1;
     } else {
-      console.log('Browser smoke passed: boot, MIME, routing, keyboard, dialog, publication review, responsive and reduced-motion contracts verified.');
+      console.log('Browser smoke passed: boot, MIME, routing, keyboard, dialog, publication review, alert routing/on-call surfaces, responsive and reduced-motion contracts verified.');
     }
   } finally {
     cdp.close();

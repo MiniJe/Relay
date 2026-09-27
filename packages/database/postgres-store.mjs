@@ -1,6 +1,15 @@
 import crypto from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { domainError } from '../shared/domain.mjs';
+import { isMigrationFileName, sortMigrationNames, splitSqlStatements, stripTransactionWrapper } from './sql.mjs';
+
+const MIGRATIONS_URL = new URL('./migrations/', import.meta.url);
+
+/** All forward migrations shipped with this release, in application order. */
+export async function listMigrationFiles() {
+  const entries = await readdir(MIGRATIONS_URL);
+  return sortMigrationNames(entries.filter(isMigrationFileName));
+}
 
 const uid = () => crypto.randomUUID();
 
@@ -25,27 +34,34 @@ export async function createPostgresStore(databaseUrl) {
   return new PostgresStore(sql);
 }
 
+/**
+ * Apply every shipped forward migration that has not yet been recorded.
+ *
+ * Each migration runs in its own transaction together with its
+ * `schema_migrations` record, so a failure leaves the database at the last
+ * fully-applied migration instead of half-migrated. Migrations are ordered by
+ * filename; nothing is hardcoded to a single release.
+ */
 export async function migratePostgres(databaseUrl) {
   const { default: postgres } = await import('postgres');
   const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10 });
   try {
     await sql.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
-    const name = '001_initial.sql';
-    const existing = await sql.unsafe('SELECT name FROM schema_migrations WHERE name = $1', [name]);
-    if (!existing.length) {
-      const contents = await readFile(new URL('./migrations/001_initial.sql', import.meta.url), 'utf8');
-      const statements = contents
-        .replace(/^\s*BEGIN;\s*/i, '')
-        .replace(/\s*COMMIT;\s*$/i, '')
-        .split(';')
-        .map((statement) => statement.trim())
-        .filter(Boolean);
+    const available = await listMigrationFiles();
+    const appliedAlready = new Set((await sql.unsafe('SELECT name FROM schema_migrations')).map((row) => row.name));
+    const applied = [];
+    for (const name of available) {
+      if (appliedAlready.has(name)) continue;
+      const contents = await readFile(new URL(name, MIGRATIONS_URL), 'utf8');
+      const statements = stripTransactionWrapper(splitSqlStatements(contents));
       await sql.begin(async (tx) => {
         for (const statement of statements) await tx.unsafe(statement);
         await tx.unsafe('INSERT INTO schema_migrations(name) VALUES ($1)', [name]);
       });
+      applied.push(name);
     }
-    return { applied: existing.length ? [] : [name] };
+    const unknown = [...appliedAlready].filter((name) => !available.includes(name));
+    return { applied, available, unknown };
   } finally {
     await sql.end({ timeout: 5 });
   }
@@ -102,11 +118,20 @@ export class PostgresStore {
     try { return await this.#one(`INSERT INTO services(id,organization_id,name,slug,description,operational_state) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[uid(),organizationId,input.name,input.slug,input.description,input.operationalState]); }
     catch(error){throw normalizeDbError(error)}
   }
-  async listServices(organizationId){return this.#many(`SELECT * FROM services WHERE organization_id=$1 ORDER BY name`,[organizationId]);}
+  async listServices(organizationId){return this.#many(`SELECT s.*, t.name AS owner_team_name FROM services s LEFT JOIN responder_teams t ON t.id=s.owner_team_id AND t.organization_id=s.organization_id WHERE s.organization_id=$1 ORDER BY s.name`,[organizationId]);}
   async getService(organizationId,serviceId){return this.#one(`SELECT * FROM services WHERE organization_id=$1 AND id=$2`,[organizationId,serviceId]);}
   async updateService(organizationId,serviceId,patch){
     const current=await this.getService(organizationId,serviceId); if(!current)return undefined;
-    return this.#one(`UPDATE services SET name=$3,slug=$4,description=$5,operational_state=$6,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,[organizationId,serviceId,patch.name??current.name,patch.slug??current.slug,patch.description??current.description,patch.operationalState??current.operationalState]);
+    const ownerTeamId='ownerTeamId' in patch?(patch.ownerTeamId??null):(current.ownerTeamId??null);
+    if(ownerTeamId){
+      const team=await this.#one(`SELECT id FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,ownerTeamId]);
+      if(!team)throw domainError('INVALID_REFERENCE','The owning responder team must belong to the same organization.',400);
+    }
+    try{
+      const updated=await this.#one(`UPDATE services SET name=$3,slug=$4,description=$5,operational_state=$6,owner_team_id=$7,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,[organizationId,serviceId,patch.name??current.name,patch.slug??current.slug,patch.description??current.description,patch.operationalState??current.operationalState,ownerTeamId]);
+      const teamName=updated.ownerTeamId?await this.#one(`SELECT name FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,updated.ownerTeamId]):undefined;
+      return {...updated,ownerTeamName:teamName?.name??null};
+    }catch(error){throw normalizeDbError(error)}
   }
 
   async createComponent(organizationId,input){
@@ -134,7 +159,7 @@ export class PostgresStore {
 
   async createStatusPage(organizationId,input){
     try{return await this.sql.begin(async(tx)=>{
-      const page=await this.#one(`INSERT INTO status_pages(id,organization_id,name,slug,is_public,branding) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING *`,[uid(),organizationId,input.name,input.slug,input.isPublic,JSON.stringify(input.branding)],tx);
+      const page=await this.#one(`INSERT INTO status_pages(id,organization_id,name,slug,is_public,branding) VALUES($1,$2,$3,$4,$5,$6::text::jsonb) RETURNING *`,[uid(),organizationId,input.name,input.slug,input.isPublic,JSON.stringify(input.branding)],tx);
       for(let i=0;i<input.componentIds.length;i++) await tx.unsafe(`INSERT INTO status_page_components(status_page_id,component_id,sort_order) SELECT $1,c.id,$3 FROM components c WHERE c.id=$2 AND c.organization_id=$4`,[page.id,input.componentIds[i],i,organizationId]);
       return {...page,componentIds:input.componentIds};
     })}catch(error){throw normalizeDbError(error)}
@@ -171,7 +196,7 @@ export class PostgresStore {
       for(const serviceId of affectedServiceIds) await tx.unsafe(`INSERT INTO incident_services(incident_id,service_id) SELECT $1,s.id FROM services s WHERE s.id=$2 AND s.organization_id=$3`,[incidentId,serviceId,organizationId]);
       for(const componentId of affectedComponentIds) await tx.unsafe(`INSERT INTO incident_components(incident_id,component_id) SELECT $1,c.id FROM components c WHERE c.id=$2 AND c.organization_id=$3`,[incidentId,componentId,organizationId]);
       await tx.unsafe(`INSERT INTO incident_responders(incident_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,[incidentId,record.creatorUserId]);
-      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
+      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
       return this.#incidentView(organizationId,incidentId,tx);
     })}catch(error){throw normalizeDbError(error)}
   }
@@ -183,7 +208,7 @@ export class PostgresStore {
       await tx.unsafe(`UPDATE incidents SET summary=$3,severity=$4,status=$5,commander_user_id=$6,resolved_at=CASE WHEN $5='RESOLVED' THEN COALESCE(resolved_at,now()) ELSE resolved_at END,updated_at=now() WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId,patch.summary??current.summary,patch.severity??current.severity,patch.status??current.status,patch.commanderUserId===undefined?current.commanderUserId:patch.commanderUserId]);
       if(affectedServiceIds){await tx.unsafe(`DELETE FROM incident_services WHERE incident_id=$1`,[incidentId]);for(const serviceId of affectedServiceIds)await tx.unsafe(`INSERT INTO incident_services(incident_id,service_id) SELECT $1,s.id FROM services s WHERE s.id=$2 AND s.organization_id=$3`,[incidentId,serviceId,organizationId]);}
       if(affectedComponentIds){await tx.unsafe(`DELETE FROM incident_components WHERE incident_id=$1`,[incidentId]);for(const componentId of affectedComponentIds)await tx.unsafe(`INSERT INTO incident_components(incident_id,component_id) SELECT $1,c.id FROM components c WHERE c.id=$2 AND c.organization_id=$3`,[incidentId,componentId,organizationId]);}
-      for(const event of events) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
+      for(const event of events) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
       return this.#incidentView(organizationId,incidentId,tx);
     });
   }
@@ -191,7 +216,7 @@ export class PostgresStore {
     const existing=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!existing)return undefined;
     return this.sql.begin(async(tx)=>{
       const update=await this.#one(`INSERT INTO incident_updates(id,incident_id,actor_user_id,message,is_public) VALUES($1,$2,$3,$4,$5) RETURNING *`,[uid(),incidentId,actorUserId,message,isPublic],tx);
-      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
+      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
       await tx.unsafe(`UPDATE incidents SET updated_at=now() WHERE id=$1`,[incidentId]);
       return {update,incident:await this.#incidentView(organizationId,incidentId,tx)};
     });
@@ -200,7 +225,7 @@ export class PostgresStore {
     const existing=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!existing)return undefined;
     return this.sql.begin(async(tx)=>{
       const inserted=await tx.unsafe(`INSERT INTO incident_responders(incident_id,user_id) SELECT $1,m.user_id FROM organization_memberships m WHERE m.organization_id=$2 AND m.user_id=$3 ON CONFLICT DO NOTHING RETURNING user_id`,[incidentId,organizationId,userId]);
-      if(inserted.length) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,'RESPONDER_JOINED','Responder joined the incident.',$4::jsonb)`,[uid(),incidentId,actorUserId,JSON.stringify({userId})]);
+      if(inserted.length) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,'RESPONDER_JOINED','Responder joined the incident.',$4::text::jsonb)`,[uid(),incidentId,actorUserId,JSON.stringify({userId})]);
       return this.#incidentView(organizationId,incidentId,tx);
     });
   }
@@ -208,8 +233,8 @@ export class PostgresStore {
     const incident=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!incident)return undefined;
     return this.sql.begin(async(tx)=>{
       const existing=await this.#one(`SELECT id FROM postmortems WHERE incident_id=$1`,[incidentId],tx);
-      if(existing) await tx.unsafe(`UPDATE postmortems SET title=$2,summary=$3,impact=$4,root_cause=$5,resolution=$6,follow_up_actions=$7::jsonb,updated_at=now() WHERE incident_id=$1`,[incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions)]);
-      else await tx.unsafe(`INSERT INTO postmortems(id,incident_id,title,summary,impact,root_cause,resolution,follow_up_actions,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)`,[uid(),incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions),userId]);
+      if(existing) await tx.unsafe(`UPDATE postmortems SET title=$2,summary=$3,impact=$4,root_cause=$5,resolution=$6,follow_up_actions=$7::text::jsonb,updated_at=now() WHERE incident_id=$1`,[incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions)]);
+      else await tx.unsafe(`INSERT INTO postmortems(id,incident_id,title,summary,impact,root_cause,resolution,follow_up_actions,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9)`,[uid(),incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions),userId]);
       await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,'{}'::jsonb)`,[uid(),incidentId,userId,existing?'POSTMORTEM_UPDATED':'POSTMORTEM_CREATED',existing?'Postmortem updated.':'Postmortem created.']);
       return this.#incidentView(organizationId,incidentId,tx);
     });
@@ -225,12 +250,364 @@ export class PostgresStore {
     return{page,components,incidents:incidents.slice(0,30)};
   }
 
-  async createAlert(organizationId,input){
-    if(input.externalId){const existing=await this.#one(`SELECT * FROM alerts WHERE organization_id=$1 AND source=$2 AND external_id=$3`,[organizationId,input.source,input.externalId]);if(existing)return existing;}
-    return this.#one(`INSERT INTO alerts(id,organization_id,source,external_id,title,description,severity,service_id,metadata,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) RETURNING *`,[uid(),organizationId,input.source,input.externalId??null,input.title,input.description,input.severity,input.serviceId??null,JSON.stringify(input.metadata??{}),input.observedAt]);
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — durable alert intake with an atomic routing record.
+  //
+  // The alert and its (initially PENDING) routing row are written in one
+  // transaction, and `alert_routings.alert_id` is unique. A retried or
+  // concurrent intake of the same `(organization, source, externalId)` alert
+  // therefore cannot produce a second routing decision or a second
+  // notification: the loser of the race observes `created: false`.
+  // ---------------------------------------------------------------------
+  async ingestAlert(organizationId,input){
+    const routingSelect=`SELECT * FROM alert_routings WHERE organization_id=$1 AND alert_id=$2`;
+    const findExisting=async(sqlx)=>input.externalId
+      ? this.#one(`SELECT * FROM alerts WHERE organization_id=$1 AND source=$2 AND external_id=$3`,[organizationId,input.source,input.externalId],sqlx)
+      : undefined;
+    try{
+      return await this.sql.begin(async(tx)=>{
+        const existing=await findExisting(tx);
+        if(existing)return{alert:existing,created:false,routing:await this.#one(routingSelect,[organizationId,existing.id],tx)};
+        const alertId=uid();
+        const alert=await this.#one(`INSERT INTO alerts(id,organization_id,source,external_id,title,description,severity,service_id,metadata,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::text::jsonb,$10) RETURNING *`,[alertId,organizationId,input.source,input.externalId??null,input.title,input.description??'',input.severity,input.serviceId??null,JSON.stringify(input.metadata??{}),input.observedAt??new Date().toISOString()],tx);
+        const routing=await this.#one(`INSERT INTO alert_routings(id,organization_id,alert_id,resolution) VALUES($1,$2,$3,'PENDING') RETURNING *`,[uid(),organizationId,alertId],tx);
+        return{alert,created:true,routing};
+      });
+    }catch(error){
+      if(error?.code==='23505'&&input.externalId){
+        const existing=await findExisting(this.sql);
+        if(existing)return{alert:existing,created:false,routing:await this.#one(routingSelect,[organizationId,existing.id])};
+      }
+      throw normalizeDbError(error);
+    }
   }
   async listAlerts(organizationId){return this.#many(`SELECT * FROM alerts WHERE organization_id=$1 ORDER BY received_at DESC LIMIT 200`,[organizationId]);}
+  async getAlert(organizationId,alertId){return this.#one(`SELECT * FROM alerts WHERE organization_id=$1 AND id=$2`,[organizationId,alertId]);}
 
+  /**
+   * Alerts joined with their routing decision, service name and acknowledger,
+   * shaped for the compact operational alert table. Alerts that predate Relay
+   * 0.2 have no routing row and are reported with `routing: null`.
+   */
+  async listAlertsWithRouting(organizationId,{limit=200}={}){
+    const rows=await this.sql.unsafe(`
+      SELECT a.id AS alert_id, a.source, a.external_id, a.title, a.description, a.severity,
+             a.service_id, a.metadata, a.observed_at, a.received_at,
+             s.name AS service_name,
+             r.id AS routing_id, r.resolution, r.notification_status, r.notification_error,
+             r.notified_at, r.evaluated_at, r.period_starts_at, r.period_ends_at,
+             r.rule_id, r.rule_name, r.schedule_id, r.schedule_name, r.team_id, r.team_name,
+             r.oncall_user_id, r.oncall_display_name, r.responder_source, r.override_id,
+             r.acknowledged_at, r.acknowledged_by_user_id, r.acknowledged_by_display_name, r.incident_id
+      FROM alerts a
+      LEFT JOIN alert_routings r ON r.alert_id=a.id AND r.organization_id=a.organization_id
+      LEFT JOIN services s ON s.id=a.service_id
+      WHERE a.organization_id=$1
+      ORDER BY a.received_at DESC, a.id DESC
+      LIMIT $2`,[organizationId,Math.max(1,Math.min(500,Number(limit)||200))]);
+    return rows.map((r)=>({
+      id:r.alert_id,source:r.source,externalId:r.external_id,title:r.title,description:r.description,
+      severity:r.severity,serviceId:r.service_id,serviceName:r.service_name??null,metadata:r.metadata,
+      observedAt:r.observed_at?.toISOString?.()??r.observed_at,receivedAt:r.received_at?.toISOString?.()??r.received_at,
+      routing:r.routing_id?{
+        id:r.routing_id,resolution:r.resolution,notificationStatus:r.notification_status,notificationError:r.notification_error,
+        notifiedAt:r.notified_at?.toISOString?.()??null,evaluatedAt:r.evaluated_at?.toISOString?.()??null,
+        periodStartsAt:r.period_starts_at?.toISOString?.()??null,periodEndsAt:r.period_ends_at?.toISOString?.()??null,
+        ruleId:r.rule_id,ruleName:r.rule_name,scheduleId:r.schedule_id,scheduleName:r.schedule_name,
+        teamId:r.team_id,teamName:r.team_name,oncallUserId:r.oncall_user_id,oncallDisplayName:r.oncall_display_name,
+        responderSource:r.responder_source,overrideId:r.override_id,
+        acknowledgedAt:r.acknowledged_at?.toISOString?.()??null,acknowledgedByUserId:r.acknowledged_by_user_id,
+        acknowledgedByDisplayName:r.acknowledged_by_display_name,incidentId:r.incident_id
+      }:null
+    }));
+  }
+  async getAlertRouting(organizationId,alertId){
+    const rows=await this.sql.unsafe(`
+      SELECT r.*, a.source AS alert_source, a.title AS alert_title, a.severity AS alert_severity,
+             a.received_at AS alert_received_at, u.display_name AS acknowledged_by_name
+      FROM alert_routings r
+      JOIN alerts a ON a.id=r.alert_id AND a.organization_id=r.organization_id
+      LEFT JOIN users u ON u.id=r.acknowledged_by_user_id
+      WHERE r.organization_id=$1 AND r.alert_id=$2`,[organizationId,alertId]);
+    if(!rows[0])return undefined;
+    const r=rows[0];
+    return {...camel(r),acknowledgedByDisplayName:r.acknowledged_by_display_name??r.acknowledged_by_name??null};
+  }
+
+  /**
+   * Persist a routing decision. Upsert keyed on the unique alert_id: an alert
+   * can only ever have one routing record, so re-evaluation overwrites rather
+   * than duplicates. Names are snapshotted so history never drifts when a rule,
+   * schedule, team or rotation changes later.
+   */
+  async recordAlertRouting(organizationId,alertId,decision){
+    try{
+      return await this.#one(`
+        INSERT INTO alert_routings(id,organization_id,alert_id,rule_id,rule_name,schedule_id,schedule_name,team_id,team_name,
+          oncall_user_id,oncall_display_name,responder_source,override_id,resolution,period_starts_at,period_ends_at,evaluated_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+        ON CONFLICT (alert_id) DO UPDATE SET
+          rule_id=EXCLUDED.rule_id, rule_name=EXCLUDED.rule_name,
+          schedule_id=EXCLUDED.schedule_id, schedule_name=EXCLUDED.schedule_name,
+          team_id=EXCLUDED.team_id, team_name=EXCLUDED.team_name,
+          oncall_user_id=EXCLUDED.oncall_user_id, oncall_display_name=EXCLUDED.oncall_display_name,
+          responder_source=EXCLUDED.responder_source, override_id=EXCLUDED.override_id,
+          resolution=EXCLUDED.resolution, period_starts_at=EXCLUDED.period_starts_at,
+          period_ends_at=EXCLUDED.period_ends_at, evaluated_at=now(), updated_at=now()
+        RETURNING *`,[uid(),organizationId,alertId,decision.ruleId??null,decision.ruleName??null,decision.scheduleId??null,
+          decision.scheduleName??null,decision.teamId??null,decision.teamName??null,decision.oncallUserId??null,
+          decision.oncallDisplayName??null,decision.responderSource??null,decision.overrideId??null,decision.resolution,
+          decision.periodStartsAt??null,decision.periodEndsAt??null]);
+    }catch(error){throw normalizeDbError(error)}
+  }
+
+  async recordRoutingNotification(organizationId,alertId,{status,provider,error,notifiedAt,discordUserId}){
+    return this.#one(`UPDATE alert_routings SET notification_status=$3,notification_provider=$4,notification_error=$5,
+      notified_at=$6,discord_user_id=$7,updated_at=now() WHERE organization_id=$1 AND alert_id=$2 RETURNING *`,
+      [organizationId,alertId,status,provider??null,error?String(error).slice(0,900):null,notifiedAt??null,discordUserId??null]);
+  }
+
+  /**
+   * First acknowledgement wins and is recorded under a row lock, so concurrent
+   * acknowledgements cannot both be persisted. Repeating an acknowledgement is
+   * an idempotent no-op reported through `alreadyAcknowledged`.
+   */
+  async acknowledgeAlertRouting(organizationId,alertId,{userId,displayName}){
+    return this.sql.begin(async(tx)=>{
+      const current=await this.#one(`SELECT * FROM alert_routings WHERE organization_id=$1 AND alert_id=$2 FOR UPDATE`,[organizationId,alertId],tx);
+      if(!current)return undefined;
+      if(current.acknowledgedAt)return{routing:current,alreadyAcknowledged:true};
+      const routing=await this.#one(`UPDATE alert_routings SET acknowledged_at=now(),acknowledged_by_user_id=$3,
+        acknowledged_by_display_name=$4,updated_at=now() WHERE organization_id=$1 AND alert_id=$2 RETURNING *`,
+        [organizationId,alertId,userId,displayName??null],tx);
+      return{routing,alreadyAcknowledged:false};
+    });
+  }
+
+  async linkRoutingIncident(organizationId,alertId,incidentId){
+    return this.#one(`UPDATE alert_routings SET incident_id=$3,updated_at=now() WHERE organization_id=$1 AND alert_id=$2 RETURNING *`,[organizationId,alertId,incidentId]);
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — responder teams
+  // ---------------------------------------------------------------------
+  async createTeam(organizationId,input){
+    try{
+      return await this.#one(`INSERT INTO responder_teams(id,organization_id,name,slug,description) VALUES($1,$2,$3,$4,$5) RETURNING *`,
+        [uid(),organizationId,input.name,input.slug,input.description??'']);
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async listTeams(organizationId){
+    return this.#many(`SELECT t.*, (SELECT count(*)::int FROM responder_team_members m WHERE m.team_id=t.id) AS member_count,
+      (SELECT count(*)::int FROM services s WHERE s.owner_team_id=t.id) AS service_count
+      FROM responder_teams t WHERE t.organization_id=$1 ORDER BY t.name`,[organizationId]);
+  }
+  async getTeam(organizationId,teamId){
+    const team=await this.#one(`SELECT * FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,teamId]);
+    if(!team)return undefined;
+    const members=await this.#many(`SELECT tm.user_id, tm.joined_at, m.role, u.display_name, u.email
+      FROM responder_team_members tm
+      JOIN organization_memberships m ON m.organization_id=tm.organization_id AND m.user_id=tm.user_id
+      JOIN users u ON u.id=tm.user_id
+      WHERE tm.organization_id=$1 AND tm.team_id=$2 ORDER BY tm.joined_at, u.display_name`,[organizationId,teamId]);
+    const services=await this.#many(`SELECT id,name,slug FROM services WHERE organization_id=$1 AND owner_team_id=$2 ORDER BY name`,[organizationId,teamId]);
+    return{...team,members:members.map((m)=>({userId:m.userId,displayName:m.displayName,email:m.email,role:m.role,joinedAt:m.joinedAt})),services};
+  }
+  async updateTeam(organizationId,teamId,patch){
+    const current=await this.#one(`SELECT * FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,teamId]);
+    if(!current)return undefined;
+    try{
+      return await this.#one(`UPDATE responder_teams SET name=$3,slug=$4,description=$5,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,
+        [organizationId,teamId,patch.name??current.name,patch.slug??current.slug,patch.description??current.description]);
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async addTeamMember(organizationId,teamId,userId){
+    try{
+      return await this.sql.begin(async(tx)=>{
+        const inserted=await tx.unsafe(`INSERT INTO responder_team_members(team_id,organization_id,user_id)
+          SELECT t.id,t.organization_id,m.user_id FROM responder_teams t
+          JOIN organization_memberships m ON m.organization_id=t.organization_id AND m.user_id=$3
+          WHERE t.organization_id=$1 AND t.id=$2
+          ON CONFLICT (team_id,user_id) DO NOTHING RETURNING user_id`,[organizationId,teamId,userId]);
+        return inserted.length>0;
+      });
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async removeTeamMember(organizationId,teamId,userId){
+    const rows=await this.sql.unsafe(`DELETE FROM responder_team_members WHERE team_id IN (SELECT id FROM responder_teams WHERE organization_id=$1 AND id=$2) AND user_id=$3 RETURNING user_id`,[organizationId,teamId,userId]);
+    return rows.length>0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — on-call schedules
+  // ---------------------------------------------------------------------
+  async createSchedule(organizationId,input){
+    try{
+      return await this.sql.begin(async(tx)=>{
+        const team=await this.#one(`SELECT id,name FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,input.teamId],tx);
+        if(!team)throw domainError('INVALID_REFERENCE','The schedule team must belong to the same organization.',400);
+        const scheduleId=uid();
+        const schedule=await this.#one(`INSERT INTO oncall_schedules(id,organization_id,team_id,name,time_zone,enabled,rotation_starts_at,rotation_interval_minutes)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [scheduleId,organizationId,input.teamId,input.name,input.timeZone,input.enabled!==false,input.rotationStartsAt,input.rotationIntervalMinutes],tx);
+        await this.#insertParticipants(organizationId,scheduleId,input.teamId,input.participantUserIds??[],tx);
+        return{...schedule,teamName:team.name,participants:await this.#participants(organizationId,scheduleId,tx),overrides:[]};
+      });
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async #insertParticipants(organizationId,scheduleId,teamId,userIds,tx){
+    for(let position=0;position<userIds.length;position+=1){
+      const inserted=await tx.unsafe(`INSERT INTO oncall_schedule_participants(schedule_id,organization_id,team_id,position,user_id)
+        SELECT $1,$2,$3,$4,m.user_id FROM responder_team_members m WHERE m.team_id=$3 AND m.user_id=$5
+        ON CONFLICT DO NOTHING RETURNING user_id`,[scheduleId,organizationId,teamId,position,userIds[position]]);
+      if(!inserted.length)throw domainError('INVALID_PARTICIPANT','Every rotation participant must be a member of the schedule team and organization.',400);
+    }
+  }
+  async #participants(organizationId,scheduleId,tx){
+    return this.#many(`SELECT p.position,p.user_id,u.display_name,u.email,p.added_at
+      FROM oncall_schedule_participants p JOIN users u ON u.id=p.user_id
+      WHERE p.organization_id=$1 AND p.schedule_id=$2 ORDER BY p.position`,[organizationId,scheduleId],tx);
+  }
+  async listSchedules(organizationId){
+    const schedules=await this.#many(`SELECT s.*, t.name AS team_name FROM oncall_schedules s
+      LEFT JOIN responder_teams t ON t.id=s.team_id AND t.organization_id=s.organization_id
+      WHERE s.organization_id=$1 ORDER BY s.created_at, s.name`,[organizationId]);
+    const participants=await this.#many(`SELECT p.*, u.display_name FROM oncall_schedule_participants p
+      JOIN users u ON u.id=p.user_id WHERE p.organization_id=$1 ORDER BY p.schedule_id,p.position`,[organizationId]);
+    const overrides=await this.#many(`SELECT o.*, u.display_name AS replacement_display_name FROM oncall_overrides o
+      LEFT JOIN users u ON u.id=o.replacement_user_id WHERE o.organization_id=$1 ORDER BY o.starts_at`,[organizationId]);
+    return schedules.map((schedule)=>({
+      ...schedule,
+      participants:participants.filter((p)=>p.scheduleId===schedule.id),
+      overrides:overrides.filter((o)=>o.scheduleId===schedule.id)
+    }));
+  }
+  async getSchedule(organizationId,scheduleId){
+    const schedule=await this.#one(`SELECT s.*, t.name AS team_name FROM oncall_schedules s
+      LEFT JOIN responder_teams t ON t.id=s.team_id AND t.organization_id=s.organization_id
+      WHERE s.organization_id=$1 AND s.id=$2`,[organizationId,scheduleId]);
+    if(!schedule)return undefined;
+    return{...schedule,participants:await this.#participants(organizationId,scheduleId,this.sql),overrides:await this.listOverrides(organizationId,scheduleId)};
+  }
+  async updateSchedule(organizationId,scheduleId,patch){
+    const current=await this.#one(`SELECT * FROM oncall_schedules WHERE organization_id=$1 AND id=$2`,[organizationId,scheduleId]);
+    if(!current)return undefined;
+    try{
+      return await this.sql.begin(async(tx)=>{
+        const schedule=await this.#one(`UPDATE oncall_schedules SET name=$3,time_zone=$4,enabled=$5,rotation_starts_at=$6,
+          rotation_interval_minutes=$7,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,
+          [organizationId,scheduleId,patch.name??current.name,patch.timeZone??current.timeZone,
+           patch.enabled===undefined?current.enabled:patch.enabled,patch.rotationStartsAt??current.rotationStartsAt,
+           patch.rotationIntervalMinutes??current.rotationIntervalMinutes],tx);
+        if(patch.participantUserIds){
+          await tx.unsafe(`DELETE FROM oncall_schedule_participants WHERE schedule_id=$1 AND organization_id=$2`,[scheduleId,organizationId]);
+          await this.#insertParticipants(organizationId,scheduleId,current.teamId,patch.participantUserIds,tx);
+        }
+        const team=await this.#one(`SELECT name FROM responder_teams WHERE organization_id=$1 AND id=$2`,[organizationId,current.teamId],tx);
+        return{...schedule,teamName:team?.name??null,participants:await this.#participants(organizationId,scheduleId,tx),overrides:await this.listOverrides(organizationId,scheduleId,tx)};
+      });
+    }catch(error){throw normalizeDbError(error)}
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — on-call overrides
+  // ---------------------------------------------------------------------
+  async createOverride(organizationId,scheduleId,input,createdByUserId){
+    try{
+      return await this.sql.begin(async(tx)=>{
+        // Serialise per schedule so two concurrent overrides cannot both pass
+        // the overlap check.
+        const schedule=await this.#one(`SELECT id,name,team_id FROM oncall_schedules WHERE organization_id=$1 AND id=$2 FOR UPDATE`,[organizationId,scheduleId],tx);
+        if(!schedule)throw domainError('SCHEDULE_NOT_FOUND','On-call schedule not found.',404);
+        const member=await this.#one(`SELECT user_id FROM organization_memberships WHERE organization_id=$1 AND user_id=$2`,[organizationId,input.replacementUserId],tx);
+        if(!member)throw domainError('INVALID_REFERENCE','The replacement responder must be a member of the organization.',400);
+        const clash=await this.#many(`SELECT id,starts_at,ends_at FROM oncall_overrides WHERE schedule_id=$1 AND organization_id=$2 AND starts_at < $4::timestamptz AND ends_at > $3::timestamptz`,
+          [scheduleId,organizationId,input.startsAt,input.endsAt],tx);
+        if(clash.length)throw domainError('OVERRIDE_OVERLAP','An override already covers part of this window. Adjust the window or delete the existing override.',409);
+        const override=await this.#one(`INSERT INTO oncall_overrides(id,organization_id,schedule_id,replacement_user_id,starts_at,ends_at,reason,created_by_user_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [uid(),organizationId,scheduleId,input.replacementUserId,input.startsAt,input.endsAt,input.reason??'',createdByUserId],tx);
+        return{...override,scheduleName:schedule.name};
+      });
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async listOverrides(organizationId,scheduleId,tx){
+    return this.#many(`SELECT o.*, u.display_name AS replacement_display_name FROM oncall_overrides o
+      LEFT JOIN users u ON u.id=o.replacement_user_id
+      WHERE o.organization_id=$1 AND ($2::text IS NULL OR o.schedule_id=$2) ORDER BY o.starts_at DESC, o.id`,[organizationId,scheduleId??null],tx??this.sql);
+  }
+  async getOverride(organizationId,overrideId){
+    return this.#one(`SELECT o.*, u.display_name AS replacement_display_name FROM oncall_overrides o
+      LEFT JOIN users u ON u.id=o.replacement_user_id WHERE o.organization_id=$1 AND o.id=$2`,[organizationId,overrideId]);
+  }
+  async deleteOverride(organizationId,overrideId){
+    const rows=await this.sql.unsafe(`DELETE FROM oncall_overrides WHERE organization_id=$1 AND id=$2 RETURNING id`,[organizationId,overrideId]);
+    return rows.length>0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — alert routing rules
+  // ---------------------------------------------------------------------
+  async createRoutingRule(organizationId,input){
+    try{
+      const rule=await this.#one(`INSERT INTO alert_routing_rules(id,organization_id,name,enabled,priority,match_service_id,match_source,match_severities,target_kind,target_schedule_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *`,
+        [uid(),organizationId,input.name,input.enabled!==false,input.priority,input.matchServiceId??null,input.matchSource??null,
+         JSON.stringify(input.matchSeverities??[]),input.targetKind??'ONCALL_SCHEDULE',input.targetScheduleId]);
+      return{...rule,scheduleName:(await this.#one(`SELECT name FROM oncall_schedules WHERE organization_id=$1 AND id=$2`,[organizationId,rule.targetScheduleId]))?.name??null};
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async listRoutingRules(organizationId){
+    return this.#many(`SELECT r.*, s.name AS schedule_name, sv.name AS match_service_name
+      FROM alert_routing_rules r
+      LEFT JOIN oncall_schedules s ON s.id=r.target_schedule_id AND s.organization_id=r.organization_id
+      LEFT JOIN services sv ON sv.id=r.match_service_id
+      WHERE r.organization_id=$1 ORDER BY r.priority, r.created_at, r.id`,[organizationId]);
+  }
+  async getRoutingRule(organizationId,ruleId){
+    return this.#one(`SELECT r.*, s.name AS schedule_name FROM alert_routing_rules r
+      LEFT JOIN oncall_schedules s ON s.id=r.target_schedule_id AND s.organization_id=r.organization_id
+      WHERE r.organization_id=$1 AND r.id=$2`,[organizationId,ruleId]);
+  }
+  async updateRoutingRule(organizationId,ruleId,patch){
+    const current=await this.#one(`SELECT * FROM alert_routing_rules WHERE organization_id=$1 AND id=$2`,[organizationId,ruleId]);
+    if(!current)return undefined;
+    try{
+      const rule=await this.#one(`UPDATE alert_routing_rules SET name=$3,enabled=$4,priority=$5,match_service_id=$6,match_source=$7,
+        match_severities=$8::text::jsonb,target_schedule_id=$9,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING *`,
+        [organizationId,ruleId,patch.name??current.name,patch.enabled===undefined?current.enabled:patch.enabled,
+         patch.priority??current.priority,'matchServiceId' in patch?(patch.matchServiceId??null):current.matchServiceId,
+         'matchSource' in patch?(patch.matchSource??null):current.matchSource,
+         JSON.stringify(patch.matchSeverities??current.matchSeverities??[]),patch.targetScheduleId??current.targetScheduleId]);
+      return{...rule,scheduleName:(await this.#one(`SELECT name FROM oncall_schedules WHERE organization_id=$1 AND id=$2`,[organizationId,rule.targetScheduleId]))?.name??null};
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async deleteRoutingRule(organizationId,ruleId){
+    const rows=await this.sql.unsafe(`DELETE FROM alert_routing_rules WHERE organization_id=$1 AND id=$2 RETURNING id`,[organizationId,ruleId]);
+    return rows.length>0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Relay 0.2 — Discord responder mapping
+  // ---------------------------------------------------------------------
+  async upsertDiscordIdentity(organizationId,userId,discordUserId){
+    try{
+      return await this.#one(`INSERT INTO discord_identities(id,organization_id,user_id,discord_user_id) VALUES($1,$2,$3,$4)
+        ON CONFLICT (organization_id,user_id) DO UPDATE SET discord_user_id=EXCLUDED.discord_user_id,updated_at=now() RETURNING *`,
+        [uid(),organizationId,userId,discordUserId]);
+    }catch(error){throw normalizeDbError(error)}
+  }
+  async getDiscordIdentity(organizationId,userId){
+    return this.#one(`SELECT * FROM discord_identities WHERE organization_id=$1 AND user_id=$2`,[organizationId,userId]);
+  }
+  async listDiscordIdentities(organizationId){
+    return this.#many(`SELECT d.id,d.organization_id,d.user_id,d.discord_user_id,d.created_at,d.updated_at,u.display_name
+      FROM discord_identities d JOIN users u ON u.id=d.user_id WHERE d.organization_id=$1 ORDER BY u.display_name`,[organizationId]);
+  }
+  async deleteDiscordIdentity(organizationId,userId){
+    const rows=await this.sql.unsafe(`DELETE FROM discord_identities WHERE organization_id=$1 AND user_id=$2 RETURNING id`,[organizationId,userId]);
+    return rows.length>0;
+  }
   async upsertIntegration(organizationId,{provider,name,secretEncrypted,enabled}){
     return this.#one(`INSERT INTO integrations(id,organization_id,provider,name,secret_encrypted,enabled) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(organization_id,provider) DO UPDATE SET name=excluded.name,secret_encrypted=excluded.secret_encrypted,enabled=excluded.enabled,updated_at=now() RETURNING *`,[uid(),organizationId,provider,name,secretEncrypted,enabled]);
   }

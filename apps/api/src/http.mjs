@@ -9,7 +9,8 @@ const mime = {
 };
 
 const appDocumentRoutes = new Set([
-  '/app','/app/','/app/services','/app/components','/app/incidents','/app/status-pages','/app/settings'
+  '/app','/app/','/app/services','/app/components','/app/incidents','/app/status-pages','/app/settings',
+  '/app/alerts','/app/teams','/app/oncall','/app/routing'
 ]);
 const appIncidentRoute = /^\/app\/incidents\/[a-zA-Z0-9_-]+\/?$/;
 const statusPageRoute = /^\/status\/[a-z0-9-]+\/?$/;

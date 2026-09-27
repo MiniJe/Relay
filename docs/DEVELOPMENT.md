@@ -46,6 +46,18 @@ npm run seed
 
 The migration command is safe to re-run. `schema_migrations` prevents reapplying completed files.
 
+Migrations are discovered from `packages/database/migrations/`, sorted by numeric
+filename prefix and applied in order, each in its own transaction with its
+`schema_migrations` row. Nothing is hardcoded to a specific release, so adding
+`003_*.sql` later requires no code change. `001_initial.sql` is never edited.
+
+To verify that a populated Relay 0.1 database upgrades cleanly to 0.2 without
+rewriting any 0.1 data:
+
+```bash
+DATABASE_URL=postgres://... npm run verify:migration
+```
+
 ## Run
 
 ```bash
@@ -70,13 +82,32 @@ npm test
 
 The suite includes:
 
-- domain lifecycle/status aggregation tests;
-- password/encryption security tests;
-- API integration tests covering tenant isolation, updates, status publication, Discord and alert intake;
-- an E2E smoke workflow;
-- a PostgreSQL migration/store contract test when `DATABASE_URL` is present.
+- domain lifecycle/status aggregation tests (`domain.test.mjs`);
+- password/encryption security tests (`security.test.mjs`);
+- on-call determinism unit tests (`oncall.test.mjs`) — timezone validation,
+  rotation maths across handoff boundaries, DST transitions, override precedence
+  and rule ordering, with the process timezone pinned to `Pacific/Kiritimati`
+  (UTC+14) to prove resolution does not depend on it;
+- API integration tests covering tenant isolation, updates, status publication,
+  Discord and alert intake (`api.integration.test.mjs`, `authz.test.mjs`);
+- alert routing integration tests (`routing.integration.test.mjs`) — the full
+  pipeline, idempotency, concurrency, notification failure, acknowledgement
+  authorization, cross-organization isolation, RBAC, malformed input and
+  public-status leakage;
+- E2E smoke workflows (`e2e.test.mjs`, `routing.e2e.test.mjs`);
+- static-asset routing tests (`static-routing.test.mjs`);
+- a 0.1 → 0.2 migration upgrade test (`migration-upgrade.test.mjs`) and a
+  PostgreSQL migration/store contract test (`postgres.contract.test.mjs`), both
+  active only when `DATABASE_URL` is present.
 
-CI provides PostgreSQL, so the contract test runs there rather than skipping.
+CI provides PostgreSQL, so the database-backed tests run there rather than
+skipping. Focused runs:
+
+```bash
+npm run test:unit          # domain + security + on-call determinism
+npm run test:integration   # HTTP API integration suites
+npm run test:e2e           # end-to-end journeys
+```
 
 ## Build verification
 
@@ -84,7 +115,7 @@ CI provides PostgreSQL, so the contract test runs there rather than skipping.
 npm run build
 ```
 
-Release 0.1 has no transpilation step. The build verifier parses every JavaScript module and verifies required release artifacts are present. The Docker image installs the locked PostgreSQL driver and runs source directly on Node 22.
+Relay has no transpilation step. The build verifier parses every JavaScript module, verifies required release artifacts are present, and fails if `package.json`'s version disagrees with `RELAY_VERSION` in `packages/shared/version.mjs`. The Docker image installs the locked PostgreSQL driver and runs source directly on Node 22.
 
 ## Security check
 
@@ -93,6 +124,37 @@ npm run check:secrets
 ```
 
 This is a lightweight guard, not a replacement for repository/CI secret-scanning products.
+
+## Qualification runs
+
+Two verification scripts exercise a real deployment rather than the test harness.
+
+### Browser qualification
+
+```bash
+npm run build && RELAY_STORE=memory node apps/api/src/server.mjs &
+npm run verify:browser
+```
+
+`scripts/browser-smoke.mjs` drives a headless Chromium over CDP with no external
+dependencies (set `RELAY_BROWSER` to point at a specific binary). It checks
+anonymous boot, MIME and API behaviour, sign-in and registration forms, keyboard
+and focus contracts, deep-link recovery, the operator journey including alert
+routing surfaces, and the responsive sweep at **1440×900, 1280×800 and 390×844**.
+
+### Production verification
+
+```bash
+npm run verify:production   # fresh database: full operator journey
+npm run verify:restart      # restart the server and prove durability
+```
+
+`scripts/production-e2e.mjs` runs against a real deployment (default
+`http://127.0.0.1:4000`, override with `RELAY_VERIFY_BASE_URL`) and walks
+registration through on-call configuration, alert routing, acknowledgement,
+escalation and public status. `restart` mode re-reads every object from
+PostgreSQL after a process restart, so a routing decision that only lived in
+memory would fail the run.
 
 ## Typical workflow
 
