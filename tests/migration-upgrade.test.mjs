@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { splitSqlStatements, stripTransactionWrapper, sortMigrationNames } from '../packages/database/sql.mjs';
-import { migratePostgres } from '../packages/database/postgres-store.mjs';
+import { listMigrationFiles, migratePostgres } from '../packages/database/postgres-store.mjs';
 
 // Relay 0.1 shipped. Upgrading a live 0.1 database to 0.2 must therefore apply
 // 002 on top of real 0.1 data without rewriting any of it. This test builds a
 // throwaway database that contains only the 0.1 schema plus representative 0.1
 // rows, runs the ordered migration runner, and asserts that:
-//   * only 002 is applied (001 is recognised as already present);
+//   * only 002 and 003 are applied (001 is recognised as already present);
 //   * every 0.1 row survives byte-for-byte;
 //   * the 0.2 tables and their tenant-safe constraints exist;
 //   * re-running the migrator is a no-op.
@@ -32,9 +32,20 @@ function databaseName(url) {
 
 test('migration ordering is derived from filenames, not readdir order', () => {
   assert.deepEqual(
-    sortMigrationNames(['002_alert_routing_oncall.sql', '010_future.sql', '001_initial.sql']),
-    ['001_initial.sql', '002_alert_routing_oncall.sql', '010_future.sql']
+    sortMigrationNames(['003_escalation_delivery.sql', '002_alert_routing_oncall.sql', '010_future.sql', '001_initial.sql']),
+    ['001_initial.sql', '002_alert_routing_oncall.sql', '003_escalation_delivery.sql', '010_future.sql']
   );
+});
+
+test('migration runner discovers migration 003 after 001 and 002', async () => {
+  assert.deepEqual(await listMigrationFiles(), ['001_initial.sql','002_alert_routing_oncall.sql','003_escalation_delivery.sql']);
+  const source=await readFile(new URL('../packages/database/migrations/003_escalation_delivery.sql',import.meta.url),'utf8');
+  const statements=stripTransactionWrapper(splitSqlStatements(source));
+  assert.ok(statements.some((sql)=>sql.includes('CREATE TABLE escalation_policies')));
+  assert.ok(statements.some((sql)=>sql.includes('CREATE TABLE escalation_jobs')));
+  assert.ok(statements.some((sql)=>sql.includes('CREATE TABLE notification_deliveries')));
+  assert.ok(statements.some((sql)=>sql.includes('CREATE TABLE notification_attempts')));
+  assert.equal(statements.some((sql)=>/^\\s*(DROP|TRUNCATE)\\b/i.test(sql)),false,'forward migration must not destructively drop or truncate existing data');
 });
 
 test('SQL statement splitting survives comments, strings and dollar-quoted bodies', () => {
@@ -60,7 +71,7 @@ test('SQL statement splitting survives comments, strings and dollar-quoted bodie
   assert.deepEqual(stripTransactionWrapper(statements).length, statements.length - 2);
 });
 
-test('upgrading a populated Relay 0.1 database applies 002 and preserves all 0.1 data', { skip: !databaseUrl ? 'DATABASE_URL not available in this environment' : false }, async () => {
+test('upgrading a populated Relay 0.1 database applies 002→003 and preserves all 0.1 data', { skip: !databaseUrl ? 'DATABASE_URL not available in this environment' : false }, async () => {
   const { maintenance } = maintenanceUrl(databaseUrl);
   const { default: postgres } = await import('postgres');
   const admin = postgres(maintenance, { max: 1, connect_timeout: 10, idle_timeout: 5 });
@@ -121,7 +132,7 @@ test('upgrading a populated Relay 0.1 database applies 002 and preserves all 0.1
 
     // ---- Stage 3: upgrade. Only 002 may be applied.
     const upgrade = await migratePostgres(target);
-    assert.deepEqual(upgrade.applied, ['002_alert_routing_oncall.sql'], 'only the new forward migration may run against a 0.1 database');
+    assert.deepEqual(upgrade.applied, ['002_alert_routing_oncall.sql','003_escalation_delivery.sql'], 'only additive 0.2 forward migrations may run against a 0.1 database');
     assert.deepEqual(upgrade.unknown, [], 'no unknown migrations recorded');
 
     // ---- Stage 4: all 0.1 data must be byte-identical.
@@ -153,7 +164,7 @@ test('upgrading a populated Relay 0.1 database applies 002 and preserves all 0.1
 
     // ---- Stage 5: 0.2 structures exist and are tenant-safe.
     const tables = (await sql.unsafe(`SELECT tablename FROM pg_tables WHERE schemaname='public'`)).map((r) => r.tablename);
-    for (const table of ['responder_teams', 'responder_team_members', 'oncall_schedules', 'oncall_schedule_participants', 'oncall_overrides', 'alert_routing_rules', 'alert_routings', 'discord_identities']) {
+    for (const table of ['responder_teams', 'responder_team_members', 'oncall_schedules', 'oncall_schedule_participants', 'oncall_overrides', 'alert_routing_rules', 'alert_routings', 'discord_identities', 'escalation_policies', 'escalation_policy_steps', 'escalation_jobs', 'notification_deliveries', 'notification_attempts']) {
       assert.ok(tables.includes(table), `0.2 table ${table} must exist after upgrade`);
     }
     const constraints = (await sql.unsafe(`

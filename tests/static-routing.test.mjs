@@ -48,7 +48,7 @@ test('static assets win over application document routes and preserve MIME/body 
 
 test('only supported SPA document routes receive the application shell', async () => {
   await withStaticServer(async (base) => {
-    for (const pathname of ['/', '/signin', '/register', '/app', '/app/', '/app/incidents/abc_123', '/status/relay-cloud-status', '/status/relay-cloud-status/incidents/abc-123']) {
+    for (const pathname of ['/', '/signin', '/register', '/app', '/app/', '/app/incidents/abc_123', '/app/escalations', '/app/alerts/alert_ab12cd', '/status/relay-cloud-status', '/status/relay-cloud-status/incidents/abc-123']) {
       const { response, body } = await get(base, pathname);
       assert.equal(response.status, 200, pathname);
       assert.match(response.headers.get('content-type') ?? '', /^text\/html\b/, pathname);
@@ -59,7 +59,7 @@ test('only supported SPA document routes receive the application shell', async (
 
 test('missing assets and unsupported document-like paths return 404 instead of the shell', async () => {
   await withStaticServer(async (base) => {
-    for (const pathname of ['/app-missing.js', '/app/missing.js', '/assets/missing.js', '/app/not-a-real-screen', '/status/bad/extra/path', '/%E0%A4%A']) {
+    for (const pathname of ['/app-missing.js', '/app/missing.js', '/assets/missing.js', '/app/not-a-real-screen', '/app/alerts/a/b', '/app/escalations/extra', '/status/bad/extra/path', '/%E0%A4%A']) {
       const { response, body } = await get(base, pathname);
       assert.equal(response.status, 404, pathname);
       assert.doesNotMatch(body, /Relay shell/, pathname);

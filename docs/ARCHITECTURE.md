@@ -196,3 +196,14 @@ release version. `GET /api/v1/health`, the OpenAPI `info.version` and the server
 startup banner all read it, and `scripts/build.mjs` fails if it disagrees with
 `package.json`, so a version cannot drift between the API, the specification,
 the logs and the published package.
+
+## M-002 escalation data (partial)
+
+Migration `003_escalation_delivery.sql` adds organization-scoped escalation
+policies/steps, rule-level channel/policy fields, immutable escalation-job
+snapshots, notification-delivery rows and attempt audit. `packages/shared/escalation.mjs`
+contains ordered-step validation, original-route due-time calculation,
+acknowledgement cancellation helpers and bounded retry classification. The
+PostgreSQL dispatcher/lease loop and provider adapters are not yet qualified;
+therefore the schema must not be mistaken for a production durable-delivery
+implementation. See [ESCALATION.md](ESCALATION.md).

@@ -442,6 +442,62 @@ async function initial() {
     assert.equal(r.json.data.resolution, 'ROUTED');
   }
 
+  // ---- Relay 0.2 / M-002: durable delivery and escalation read model -------
+  let deliveryState = null;
+  if (alert) {
+    const deliveries = (await client.request(`${orgBase}/alerts/${alert.id}/deliveries`, { expected: 200 })).json;
+    assert.ok(deliveries.data.length >= 1, 'routing must persist at least one logical delivery for the configured channel');
+    assert.equal(deliveries.summary.total, deliveries.data.length);
+    assert.equal(typeof deliveries.summary.label, 'string', 'the delivery summary must carry an operator-readable label');
+    const first = deliveries.data[0];
+    assert.equal(typeof first.statusLabel, 'string', 'every delivery carries an operator-readable state label');
+    assert.ok(Array.isArray(first.attempts), 'the delivery read model must include its attempt history');
+    assert.equal(first.attempts.length, first.attemptCount, 'there is exactly one immutable attempt row per recorded attempt');
+    assert.equal(first.destination.integrationId !== undefined, true, 'the destination snapshot describes where the page went without exposing a secret');
+
+    let detail = (await client.request(`${orgBase}/deliveries/${first.id}`, { expected: 200 })).json.data;
+    assert.equal(detail.id, first.id);
+    assert.equal(detail.alert.id, alert.id, 'a delivery is always traceable to its alert');
+    const serialized = JSON.stringify(deliveries) + JSON.stringify(detail);
+    for (const forbidden of [alertKey, 'hooks.slack.com', 'smtp://', 'password']) {
+      assert.equal(serialized.includes(forbidden), false, `delivery reads must never expose ${forbidden}`);
+    }
+
+    // A delivered page is terminal; anything else can be retried by a human,
+    // and the retry adds an attempt instead of erasing the history.
+    if (first.status === 'SENT') {
+      const retry = await client.request(`${orgBase}/deliveries/${first.id}/retry`, { method: 'POST', body: {}, expected: 409 });
+      assert.equal(retry.json.error.code, 'DELIVERY_ALREADY_SENT', 'a delivered page is never re-sent by a manual retry');
+    } else {
+      const before = first.attemptCount;
+      const retry = await client.request(`${orgBase}/deliveries/${first.id}/retry`, { method: 'POST', body: {}, expected: 202 });
+      assert.ok(retry.json.data.attempts.length >= before, 'a manual retry preserves and extends the attempt history');
+      assert.ok(['FAILED', 'RETRYING', 'SENT'].includes(retry.json.data.status), `unexpected post-retry status ${retry.json.data.status}`);
+    }
+    detail = (await client.request(`${orgBase}/deliveries/${first.id}`, { expected: 200 })).json.data;
+
+    const escalation = (await client.request(`${orgBase}/alerts/${alert.id}/escalation`, { expected: 200 })).json.data;
+    assert.equal(escalation.planned, escalation.steps.length, 'the escalation read model reports every materialized step');
+    assert.equal(typeof escalation.executed, 'number');
+    assert.equal(typeof escalation.unresolved, 'number');
+    assert.equal(Array.isArray(escalation.immediateDeliveries), true);
+    const allDeliveries = (await client.request(`${orgBase}/alerts/${alert.id}/deliveries`, { expected: 200 })).json;
+    assert.equal(allDeliveries.data.length, 1 + escalation.steps.reduce((sum, step) => sum + step.deliveries.length, 0), 'immediate and escalation pages are both present in the audit');
+
+    deliveryState = {
+      deliveryId: detail.id,
+      provider: detail.provider,
+      status: detail.status,
+      attemptCount: detail.attemptCount,
+      completionAt: detail.completedAt ?? null,
+      attemptIds: detail.attempts.map((attempt) => attempt.id),
+      attemptOutcomes: detail.attempts.map((attempt) => attempt.outcome),
+      escalationPlanned: escalation.planned,
+      escalationExecuted: escalation.executed,
+      escalationCancelled: escalation.cancelled
+    };
+  }
+
   // Re-read the 0.2 configuration so restart mode verifies whatever is actually
   // persisted now, including the renames performed by the immutability checks.
   const finalSchedule = (await client.request(`${orgBase}/oncall/schedules/${schedule.id}`, { expected: 200 })).json.data;
@@ -481,7 +537,8 @@ async function initial() {
       alertExternalId: `release-${marker}`,
       routingId: alert?.routing?.id ?? null,
       notificationStatus: alert?.routing?.notificationStatus ?? null,
-      escalatedIncidentId: escalatedIncident?.id ?? null
+      escalatedIncidentId: escalatedIncident?.id ?? null,
+      delivery: deliveryState
     }
   }, null, 2), { mode: 0o600 });
 
@@ -613,6 +670,27 @@ async function restart() {
       assert.equal(replay.json.data.duplicate, true, 'a post-restart replay must still be recognised as a duplicate');
       assert.equal(replay.json.data.id, r02.alertId);
       assert.equal(replay.json.data.routing.id, r02.routingId, 'a post-restart replay must not create a second routing record');
+    }
+
+    // Durable delivery survives the restart: same record, same attempt history,
+    // and nothing already delivered is attempted again by the restarted worker.
+    if (r02.delivery) {
+      const after = (await client.request(`${orgBase}/alerts/${r02.alertId}/deliveries`, { expected: 200 })).json.data;
+      const delivery = after.find((entry) => entry.id === r02.delivery.deliveryId);
+      assert.ok(delivery, 'the persisted delivery must survive a restart');
+      assert.equal(delivery.provider, r02.delivery.provider);
+      assert.equal(delivery.attemptCount, r02.delivery.attemptCount, 'a restart must not add or lose an attempt');
+      assert.equal(delivery.status, r02.delivery.status, 'the delivery state is decided by the database, not by process memory');
+      assert.deepEqual(delivery.attempts.map((attempt) => attempt.id), r02.delivery.attemptIds, 'attempt rows are immutable across a restart');
+      assert.deepEqual(delivery.attempts.map((attempt) => attempt.outcome), r02.delivery.attemptOutcomes);
+      const escalation = (await client.request(`${orgBase}/alerts/${r02.alertId}/escalation`, { expected: 200 })).json.data;
+      assert.equal(escalation.planned, r02.delivery.escalationPlanned, 'the escalation plan must survive a restart');
+      assert.equal(escalation.executed, r02.delivery.escalationExecuted);
+      assert.equal(escalation.cancelled, r02.delivery.escalationCancelled);
+      if (delivery.status === 'SENT') {
+        const retry = await client.request(`${orgBase}/deliveries/${delivery.id}/retry`, { method: 'POST', body: {}, expected: 409 });
+        assert.equal(retry.json.error.code, 'DELIVERY_ALREADY_SENT', 'a delivered page must never be re-sent after a restart');
+      }
     }
 
     r = await client.request(`/api/v1/public/status/${state.statusSlug}`, { expected: 200 });

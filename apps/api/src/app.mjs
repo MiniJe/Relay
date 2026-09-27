@@ -6,6 +6,12 @@ import { buildOnCallState, resolveScheduleOnCall, routeAlert } from './routing.m
 import { RELAY_VERSION } from '../../../packages/shared/version.mjs';
 import { authenticate, requireOrgRole, requireUser } from './auth.mjs';
 import { sendDiscordNotification } from './discord.mjs';
+import { createDeliveryWorker } from './worker.mjs';
+import { encodeSmtpSecret, smtpTransportOptions } from './email.mjs';
+import { INTEGRATION_PROVIDER_BY_CHANNEL } from './delivery.mjs';
+import { slackWebhookUrl, smtpIntegrationInput } from '../../../packages/shared/validation.mjs';
+import { ATTEMPT_OUTCOME_LABELS, DELIVERY_STATE_LABELS, PROVIDER_LABELS, summarizeDeliveries } from '../../../packages/shared/escalation.mjs';
+import { buildAlertEscalationState } from './escalation-state.mjs';
 import { assertMutationOrigin, clientIp, errorResponse, readJson, sendJson, sendNoContent, serveStatic } from './http.mjs';
 import { openapi } from './openapi.mjs';
 import { clearSessionCookie, createOpaqueToken, encryptSecret, hashPassword, safeEqualText, sessionCookie, sha256, SlidingWindowRateLimiter, verifyPassword } from './security.mjs';
@@ -39,8 +45,18 @@ async function validateCommander(store,organizationId,commanderUserId) {
   if(!membership)throw domainError('INVALID_COMMANDER','Incident commander must be a member of the organization.',400);
 }
 
-export function createRelayServer({store,config,fetchImpl=fetch,hub=new RealtimeHub(),logger=console}) {
+export function createRelayServer({store,config,fetchImpl=fetch,hub=new RealtimeHub(),logger=console,worker=null,transports={}}) {
   const loginLimiter=new SlidingWindowRateLimiter({windowMs:15*60_000,limit:30});
+  // The durable-delivery worker is created (not started) here so the request
+  // path can drain the outbox once after a routing commit, keeping paging
+  // latency close to the old direct send. The polling lifecycle belongs to the
+  // server process, which starts it after database readiness.
+  const deliveryWorker=worker??createDeliveryWorker({
+    store,config,transports,fetchImpl,logger,
+    pollIntervalMs:Number(config.workerIntervalMs??15_000),
+    leaseSeconds:Number(config.workerLeaseSeconds??120),
+    batchSize:Number(config.workerBatchSize??20)
+  });
   const alertLimiter=new SlidingWindowRateLimiter({windowMs:60_000,limit:120});
   const publicLimiter=new SlidingWindowRateLimiter({windowMs:60_000,limit:600});
 
@@ -98,7 +114,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
             // Resolution uses the routing instant, never the alert's own `timestamp`:
             // a delayed alert should page whoever is on call now, and a hostile or
             // malformed observed timestamp must not be able to choose the responder.
-            const routed=await routeAlert({store,config,organizationId:organization.id,alert:ingested.alert,fetchImpl,logger});
+            const routed=await routeAlert({store,config,organizationId:organization.id,alert:ingested.alert,fetchImpl,logger,worker:deliveryWorker});
             routing=routed.routing??routing;warnings.push(...(routed.warnings??[]));
             hub.publish(organization.id,{type:'alert.routed',alertId:ingested.alert.id,resolution:routing?.resolution??null});
           }catch(error){
@@ -160,7 +176,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
       const orgBase=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)$/);
       if(req.method==='GET'&&orgBase){const user=requireUser(session);await requireOrgRole({store,userId:user.id,organizationId:orgBase[1],allowed:readableRoles});const org=await store.getOrganization(orgBase[1]);if(!org)throw domainError('ORGANIZATION_NOT_FOUND','Organization not found.',404);return sendJson(res,200,{data:org});}
 
-      const collection=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/(services|components|status-pages|incidents|alerts|integrations|teams|routing-rules|members)$/);
+      const collection=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/(services|components|status-pages|incidents|alerts|integrations|teams|routing-rules|escalation-policies|members)$/);
       if(collection){
         const user=requireUser(session);const organizationId=collection[1],resource=collection[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
         if(req.method==='GET'){
@@ -172,6 +188,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           if(resource==='members')return sendJson(res,200,{data:(await store.listMemberships(organizationId)).map((m)=>({userId:m.userId,role:m.role,createdAt:m.createdAt,displayName:m.user?.displayName??null,email:m.user?.email??null}))});
           if(resource==='teams')return sendJson(res,200,{data:await store.listTeams(organizationId)});
           if(resource==='routing-rules')return sendJson(res,200,{data:await store.listRoutingRules(organizationId)});
+          if(resource==='escalation-policies')return sendJson(res,200,{data:await store.listEscalationPolicies(organizationId)});
           if(resource==='integrations')return sendJson(res,200,{data:await store.listIntegrations(organizationId)});
         }
         if(req.method==='POST'){
@@ -184,7 +201,8 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
             const warning=await notifyDiscord(organizationId,'created',incident);hub.publish(organizationId,{type:'incident.created',incidentId:incident.id});return sendJson(res,201,{data:incident,...(warning?{warnings:[warning]}:{})});
           }
           if(resource==='teams'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=teamInput(await readJson(req));if(!input.slug)throw domainError('VALIDATION_ERROR','Responder team slug is invalid.',400);return sendJson(res,201,{data:await store.createTeam(organizationId,input)});}
-          if(resource==='routing-rules'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=routingRuleInput(await readJson(req));if(!await store.getSchedule(organizationId,input.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);if(input.matchServiceId&&!await store.getService(organizationId,input.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);return sendJson(res,201,{data:await store.createRoutingRule(organizationId,input)});}
+          if(resource==='routing-rules'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=routingRuleInput(await readJson(req));if(!await store.getSchedule(organizationId,input.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);if(input.matchServiceId&&!await store.getService(organizationId,input.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);if(input.escalationPolicyId&&!await store.getEscalationPolicy(organizationId,input.escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);return sendJson(res,201,{data:await store.createRoutingRule(organizationId,input)});}
+          if(resource==='escalation-policies'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const body=object(await readJson(req));const name=string(body.name,'name',{min:2,max:120});const description=string(body.description??'','description',{min:0,max:2000,optional:true})??'';const steps=Array.isArray(body.steps)?body.steps.map((step)=>({position:step.position,afterMinutes:step.afterMinutes,targetScheduleId:id(step.targetScheduleId,'targetScheduleId'),channels:step.channels})):[];for(const step of steps)if(!await store.getSchedule(organizationId,step.targetScheduleId))throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);return sendJson(res,201,{data:await store.saveEscalationPolicy(organizationId,{name,description,enabled:body.enabled!==false,steps})});}
         }
       }
 
@@ -236,6 +254,44 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
       const discordRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/integrations\/discord$/);
       if(discordRoute&&req.method==='PUT'){
         const user=requireUser(session),organizationId=discordRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const body=object(await readJson(req));const webhookUrl=string(body.webhookUrl,'webhookUrl',{min:20,max:1000});let parsed;try{parsed=new URL(webhookUrl)}catch{throw domainError('VALIDATION_ERROR','webhookUrl must be a valid URL.',400)};if(parsed.protocol!=='https:'||!['discord.com','discordapp.com'].some((host)=>parsed.hostname===host||parsed.hostname.endsWith(`.${host}`)))throw domainError('VALIDATION_ERROR','Only Discord HTTPS webhook URLs are supported.',400);const integration=await store.upsertIntegration(organizationId,{provider:'DISCORD',name:string(body.name??'Discord','name',{max:80}),secretEncrypted:encryptSecret(webhookUrl,config.integrationEncryptionKey),enabled:body.enabled!==false});const {secretEncrypted,...safe}=integration;return sendJson(res,200,{data:safe});
+      }
+
+      const slackRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/integrations\/slack$/);
+      if(slackRoute&&(req.method==='PUT'||req.method==='DELETE')){
+        const user=requireUser(session),organizationId=slackRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});
+        if(req.method==='DELETE'){
+          const removed=await store.deleteIntegration(organizationId,'SLACK');
+          hub.publish(organizationId,{type:'integrations.changed'});return sendJson(res,200,{data:{provider:'SLACK',configured:false,removed}});
+        }
+        const body=object(await readJson(req));
+        // Only Slack Incoming Webhook URLs are accepted; an arbitrary URL is
+        // rejected before it can ever be stored or called.
+        const webhookUrl=slackWebhookUrl(body.webhookUrl);
+        const integration=await store.upsertIntegration(organizationId,{provider:'SLACK',name:string(body.name??'Slack','name',{max:80}),secretEncrypted:encryptSecret(webhookUrl,config.integrationEncryptionKey),config:{},enabled:body.enabled!==false});
+        const {secretEncrypted,...safe}=integration;
+        hub.publish(organizationId,{type:'integrations.changed'});return sendJson(res,200,{data:safe});
+      }
+
+      const smtpRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/integrations\/smtp$/);
+      if(smtpRoute&&(req.method==='PUT'||req.method==='DELETE')){
+        const user=requireUser(session),organizationId=smtpRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});
+        if(req.method==='DELETE'){
+          const removed=await store.deleteIntegration(organizationId,'SMTP');
+          hub.publish(organizationId,{type:'integrations.changed'});return sendJson(res,200,{data:{provider:'SMTP',configured:false,removed}});
+        }
+        const body=object(await readJson(req));
+        const existing=await store.getIntegration(organizationId,'SMTP');
+        const input=smtpIntegrationInput({...body,keepExistingPassword:body.password?false:Boolean(existing)});
+        if(!existing&&input.password===undefined)throw domainError('VALIDATION_ERROR','A password is required the first time SMTP is configured.',400);
+        const secret=input.password===undefined?existing.secretEncrypted:encryptSecret(encodeSmtpSecret(input.password),config.integrationEncryptionKey);
+        const integration=await store.upsertIntegration(organizationId,{provider:'SMTP',name:string(body.name??'Email','name',{max:80}),secretEncrypted:secret,
+          config:{host:input.host,port:input.port,secure:input.secure,username:input.username,fromEmail:input.fromEmail,fromName:input.fromName,timeoutMs:input.timeoutMs},enabled:input.enabled});
+        const {secretEncrypted,...safe}=integration;
+        // A stored credential is reported as a boolean only. The password, and
+        // the decrypted configuration, are never returned by any read.
+        const safeConfig={...safe.config,passwordConfigured:Boolean(secret)};
+        hub.publish(organizationId,{type:'integrations.changed'});
+        return sendJson(res,200,{data:{...safe,config:safeConfig}});
       }
 
       const eventsRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/events$/);
@@ -365,8 +421,19 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const patch=routingRulePatch(await readJson(req));
           if(patch.targetScheduleId&&!await store.getSchedule(organizationId,patch.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);
           if('matchServiceId' in patch&&patch.matchServiceId&&!await store.getService(organizationId,patch.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);
+          if(patch.escalationPolicyId&&!await store.getEscalationPolicy(organizationId,patch.escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);
           const updated=await store.updateRoutingRule(organizationId,ruleId,patch);if(!updated)throw domainError('RULE_NOT_FOUND','Routing rule not found.',404);
           hub.publish(organizationId,{type:'routing.rulesChanged'});return sendJson(res,200,{data:updated});
+        }
+      }
+
+      const escalationPolicyItem=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/escalation-policies\/([a-zA-Z0-9_-]+)$/);
+      if(escalationPolicyItem){
+        const user=requireUser(session),organizationId=escalationPolicyItem[1],policyId=escalationPolicyItem[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        if(req.method==='GET'){const policy=await store.getEscalationPolicy(organizationId,policyId);if(!policy)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendJson(res,200,{data:policy});}
+        if(req.method==='DELETE'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const deleted=await store.deleteEscalationPolicy(organizationId,policyId);if(!deleted)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendNoContent(res,204);}
+        if(req.method==='PUT'||req.method==='PATCH'){
+          await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const body=object(await readJson(req));const name=string(body.name,'name',{min:2,max:120});const description=string(body.description??'','description',{min:0,max:2000,optional:true})??'';const steps=Array.isArray(body.steps)?body.steps.map((step)=>({position:step.position,afterMinutes:step.afterMinutes,targetScheduleId:id(step.targetScheduleId,'targetScheduleId'),channels:step.channels})):[];for(const step of steps)if(!await store.getSchedule(organizationId,step.targetScheduleId))throw domainError('INVALID_REFERENCE','Escalation schedules must belong to the same organization.',400);const saved=await store.saveEscalationPolicy(organizationId,{name,description,enabled:body.enabled!==false,steps},policyId);if(!saved)throw domainError('POLICY_NOT_FOUND','Escalation policy not found.',404);return sendJson(res,200,{data:saved});
         }
       }
 
@@ -426,7 +493,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           hub.publish(organizationId,{type:'alert.routed',alertId});
           return sendJson(res,200,{data:previous,alreadyNotified:true});
         }
-        const routed=await routeAlert({store,config,organizationId,alert,fetchImpl,logger});
+        const routed=await routeAlert({store,config,organizationId,alert,fetchImpl,logger,worker:deliveryWorker});
         hub.publish(organizationId,{type:'alert.routed',alertId,resolution:routed.routing?.resolution??null});
         return sendJson(res,200,{data:routed.routing,alreadyNotified:false,...(routed.warnings?.length?{warnings:routed.warnings}:{})});
       }
@@ -463,12 +530,90 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
         return sendJson(res,200,{data:routing});
       }
 
+      // -----------------------------------------------------------------
+      // Relay 0.2 — durable delivery reads and manual retry. Internal,
+      // authenticated operational data only: provider secrets are never part
+      // of any response shape below.
+      // -----------------------------------------------------------------
+      const safeDelivery=(delivery,attempts=[])=>({
+        id:delivery.id,organizationId:delivery.organizationId,alertId:delivery.alertId,routingId:delivery.routingId,
+        escalationJobId:delivery.escalationJobId??null,provider:delivery.provider,
+        providerLabel:PROVIDER_LABELS[delivery.provider]??delivery.provider,
+        responderUserId:delivery.responderUserId??null,responderDisplayName:delivery.responderNameSnapshot??null,
+        destination:delivery.destinationSnapshot??{},status:delivery.status,
+        statusLabel:DELIVERY_STATE_LABELS[delivery.status]??delivery.status,
+        scheduledAt:delivery.scheduledAt,attemptCount:delivery.attemptCount??0,nextAttemptAt:delivery.nextAttemptAt??null,
+        lastAttemptAt:delivery.lastAttemptAt??null,completedAt:delivery.completedAt??null,lastError:delivery.lastError??null,
+        manualRetryRequestedBy:delivery.manualRetryByUserId??null,
+        inFlight:delivery.status==='IN_FLIGHT',leaseExpiresAt:delivery.leaseExpiresAt??null,
+        attempts:attempts.map((attempt)=>({
+          id:attempt.id,attemptNumber:attempt.attemptNumber,startedAt:attempt.startedAt,completedAt:attempt.completedAt,
+          outcome:attempt.outcome,outcomeLabel:ATTEMPT_OUTCOME_LABELS[attempt.outcome]??attempt.outcome,
+          providerStatusCode:attempt.providerStatusCode??null,safeError:attempt.safeError??null,
+          manualRetryByUserId:attempt.manualRetryByUserId??null,manual:Boolean(attempt.manual)
+        }))
+      });
+
+      const alertDeliveries=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/alerts\/([a-zA-Z0-9_-]+)\/deliveries$/);
+      if(alertDeliveries&&req.method==='GET'){
+        const user=requireUser(session),organizationId=alertDeliveries[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        const alert=await store.getAlert(organizationId,alertDeliveries[2]);if(!alert)throw domainError('ALERT_NOT_FOUND','Alert not found.',404);
+        const deliveries=await store.listAlertDeliveries(organizationId,alert.id);
+        const attempts=await Promise.all(deliveries.map((delivery)=>store.listDeliveryAttempts(organizationId,delivery.id)));
+        const data=deliveries.map((delivery,index)=>safeDelivery(delivery,attempts[index]));
+        return sendJson(res,200,{data,summary:summarizeDeliveries(deliveries)});
+      }
+
+      const deliveryItem=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/deliveries\/([a-zA-Z0-9_-]+)$/);
+      if(deliveryItem&&req.method==='GET'){
+        const user=requireUser(session),organizationId=deliveryItem[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        const delivery=await store.getDelivery(organizationId,deliveryItem[2]);
+        if(!delivery)throw domainError('DELIVERY_NOT_FOUND','Delivery not found.',404);
+        const attempts=await store.listDeliveryAttempts(organizationId,delivery.id);
+        return sendJson(res,200,{data:{...safeDelivery(delivery,attempts),alert:await store.getAlert(organizationId,delivery.alertId)}});
+      }
+
+      const deliveryRetry=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/deliveries\/([a-zA-Z0-9_-]+)\/retry$/);
+      if(deliveryRetry&&req.method==='POST'){
+        const user=requireUser(session),organizationId=deliveryRetry[1];
+        // Manual retry is an operational response action: VIEWER is rejected.
+        await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});
+        const delivery=await store.getDelivery(organizationId,deliveryRetry[2]);
+        if(!delivery)throw domainError('DELIVERY_NOT_FOUND','Delivery not found.',404);
+        if(delivery.status==='SENT')throw domainError('DELIVERY_ALREADY_SENT','This page was already delivered. See the alert escalation history for a new page.',409);
+        if(delivery.status==='CANCELLED')throw domainError('DELIVERY_CANCELLED','This delivery was cancelled when the alert was acknowledged.',409);
+        const scheduled=await store.scheduleManualRetry({organizationId,deliveryId:delivery.id,userId:user.id,now:new Date().toISOString()});
+        if(!scheduled)throw domainError('DELIVERY_NOT_RETRYABLE','This delivery cannot be retried.',409);
+        // Attempts are preserved: a manual retry adds an attempt, it never
+        // erases the history that explains what happened.
+        await deliveryWorker.kick(new Date(),{alertId:delivery.alertId});
+        const refreshed=await store.getDelivery(organizationId,delivery.id);
+        const attempts=await store.listDeliveryAttempts(organizationId,delivery.id);
+        hub.publish(organizationId,{type:'delivery.retryRequested',alertId:delivery.alertId,deliveryId:delivery.id});
+        return sendJson(res,202,{data:safeDelivery(refreshed,attempts)});
+      }
+
+      const alertEscalation=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/alerts\/([a-zA-Z0-9_-]+)\/escalation$/);
+      if(alertEscalation&&req.method==='GET'){
+        const user=requireUser(session),organizationId=alertEscalation[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        const alert=await store.getAlert(organizationId,alertEscalation[2]);if(!alert)throw domainError('ALERT_NOT_FOUND','Alert not found.',404);
+        return sendJson(res,200,{data:await buildAlertEscalationState({store,organizationId,alertId:alert.id,now:new Date().toISOString()})});
+      }
+
       const alertItem=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/alerts\/([a-zA-Z0-9_-]+)$/);
       if(alertItem&&req.method==='GET'){
         const user=requireUser(session),organizationId=alertItem[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
         const alert=await store.getAlert(organizationId,alertItem[2]);if(!alert)throw domainError('ALERT_NOT_FOUND','Alert not found.',404);
         const services=alert.serviceId?await store.getService(organizationId,alert.serviceId):undefined;
-        return sendJson(res,200,{data:{...alert,serviceName:services?.name??null,routing:await store.getAlertRouting(organizationId,alertItem[2])??null}});
+        const routing=await store.getAlertRouting(organizationId,alertItem[2])??null;
+        const deliveries=await store.listAlertDeliveries(organizationId,alert.id);
+        const attempts=await Promise.all(deliveries.map((delivery)=>store.listDeliveryAttempts(organizationId,delivery.id)));
+        return sendJson(res,200,{data:{
+          ...alert,serviceName:services?.name??null,routing,
+          deliveries:deliveries.map((delivery,index)=>safeDelivery(delivery,attempts[index])),
+          deliverySummary:summarizeDeliveries(deliveries),
+          escalation:await buildAlertEscalationState({store,organizationId,alertId:alert.id,now:new Date().toISOString()})
+        }});
       }
 
       if(pathname.startsWith('/api/'))throw domainError('NOT_FOUND','API route not found.',404);

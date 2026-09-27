@@ -59,7 +59,7 @@ function renderOnboarding(){
   document.querySelector('#org-form').addEventListener('submit',async(e)=>{e.preventDefault();try{const org=await api('/api/v1/organizations',{method:'POST',body:{name:document.querySelector('#org-name').value,slug:document.querySelector('#org-slug').value||undefined}});state.orgs=[...state.orgs,{...org,role:'OWNER'}];state.orgId=org.id;localStorage.setItem('relay.orgId',org.id);navigate('/app')}catch(error){toast(error.message,'error')}})
 }
 
-const navItems=[['/app','⌂','Overview'],['/app/alerts','◈','Alerts'],['/app/oncall','◷','On-call'],['/app/incidents','⚡','Incidents'],['/app/services','◫','Services'],['/app/components','◉','Components'],['/app/teams','◎','Teams'],['/app/routing','⇶','Routing'],['/app/status-pages','◌','Status pages'],['/app/settings','⚙','Settings']];
+const navItems=[['/app','⌂','Overview'],['/app/alerts','◈','Alerts'],['/app/escalations','⏱','Escalations'],['/app/oncall','◷','On-call'],['/app/incidents','⚡','Incidents'],['/app/services','◫','Services'],['/app/components','◉','Components'],['/app/teams','◎','Teams'],['/app/routing','⇶','Routing'],['/app/status-pages','◌','Status pages'],['/app/settings','⚙','Settings']];
 function shell(title,content,actions=''){
   const org=state.orgs.find((x)=>x.id===state.orgId)??state.orgs[0];
   const path=location.pathname;
@@ -149,14 +149,48 @@ async function renderStatusPages(seq=++renderSeq){
 }
 
 async function renderSettings(seq=++renderSeq){
-  const [org,integrations]=await Promise.all([api(`/api/v1/organizations/${state.orgId}`),api(`/api/v1/organizations/${state.orgId}/integrations`)]);const discord=integrations.find((x)=>x.provider==='DISCORD');
+  const [org,integrations]=await Promise.all([api(`/api/v1/organizations/${state.orgId}`),api(`/api/v1/organizations/${state.orgId}/integrations`)]);const discord=integrations.find((x)=>x.provider==='DISCORD');const slack=integrations.find((x)=>x.provider==='SLACK');const smtp=integrations.find((x)=>x.provider==='SMTP');
   const members=canConfigure()?await api(`/api/v1/organizations/${state.orgId}/members`).catch(()=>[]):[];
   const identities=canConfigure()?await api(`/api/v1/organizations/${state.orgId}/discord-identities`).catch(()=>[]):[];
   const identityFor=(userId)=>identities.find((x)=>x.userId===userId)?.discordUserId??'';
-  const content=`<div class="page-head"><div><h1>Settings</h1><p>Workspace integration and intake configuration.</p></div></div><div class="grid grid-2"><section class="card"><div class="section-head"><h2>Workspace</h2><span>${esc(state.orgs.find((x)=>x.id===state.orgId)?.role??'')}</span></div><div class="field"><label>Name</label><input class="input" value="${esc(org.name)}" disabled></div><div class="field"><label>Slug</label><input class="input" value="${esc(org.slug)}" disabled></div><p class="muted" style="font-size:12px">Alert intake uses this slug in <code>organizationSlug</code>. The intake endpoint is <code>POST /api/v1/alerts</code>.</p></section><section class="card"><div class="section-head"><h2>Discord webhook</h2>${discord?.enabled?'<span class="badge state-OPERATIONAL">Enabled</span>':'<span class="badge">Not configured</span>'}</div><p class="muted">Relay sends incident-created, public-update and resolved notifications, plus routed-alert notifications that name the resolved on-call responder. Webhook secrets are encrypted at rest and never returned by any read.</p><form id="discord-form"><div class="field"><label>Integration name</label><input class="input" name="name" value="${esc(discord?.name??'Incident Operations')}"></div><div class="field"><label>Discord webhook URL</label><input class="input" name="webhookUrl" type="url" required placeholder="https://discord.com/api/webhooks/…" autocomplete="off"></div><button class="btn btn-primary" type="submit">${discord?'Replace webhook':'Configure Discord'}</button></form></section></div>${canConfigure()?`<section class="card section"><div class="section-head"><h2>Responder Discord mapping</h2><span>Optional · no OAuth</span></div><p class="muted">Map a Relay user to their numeric Discord user id so routed-alert notifications can mention the person who is actually on call. Without a mapping the notification still names the responder. Values are numeric snowflakes only, so nothing Markdown-bearing can be injected, and webhook secrets are never shown here.</p><div class="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th>Discord user id</th><th></th></tr></thead><tbody>${members.map((m)=>`<tr><td class="name-cell">${esc(m.displayName??'—')}<div class="subtext">${esc(m.email??'')}</div></td><td>${esc(m.role)}</td><td><input class="input discord-map" data-user="${esc(m.userId)}" inputmode="numeric" pattern="[0-9]{15,25}" maxlength="25" placeholder="123456789012345678" value="${esc(identityFor(m.userId))}" aria-label="Discord user id for ${esc(m.displayName??'member')}"></td><td><button class="btn btn-sm" data-save-discord="${esc(m.userId)}">Save</button>${identityFor(m.userId)?`<button class="btn btn-sm btn-danger" data-clear-discord="${esc(m.userId)}">Clear</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">No organization members.</td></tr>'}</tbody></table></div></section>`:''}<section class="card section"><div class="section-head"><h2>API</h2><span>v1</span></div><p class="muted">Relay exposes versioned operations under <code>/api/v1</code>, including alert routing, on-call resolution and acknowledgement. Machine-readable OpenAPI is available at <a href="/api/v1/openapi.json" target="_blank">/api/v1/openapi.json ↗</a>.</p></section>`;
+  const content=`<div class="page-head"><div><h1>Settings</h1><p>Workspace integration and intake configuration.</p></div></div><div class="grid grid-2"><section class="card"><div class="section-head"><h2>Workspace</h2><span>${esc(state.orgs.find((x)=>x.id===state.orgId)?.role??'')}</span></div><div class="field"><label>Name</label><input class="input" value="${esc(org.name)}" disabled></div><div class="field"><label>Slug</label><input class="input" value="${esc(org.slug)}" disabled></div><p class="muted" style="font-size:12px">Alert intake uses this slug in <code>organizationSlug</code>. The intake endpoint is <code>POST /api/v1/alerts</code>.</p></section><section class="card"><div class="section-head"><h2>Discord webhook</h2>${discord?.enabled?'<span class="badge state-OPERATIONAL">Enabled</span>':'<span class="badge">Not configured</span>'}</div><p class="muted">Relay sends incident-created, public-update and resolved notifications, plus routed-alert notifications that name the resolved on-call responder. Webhook secrets are encrypted at rest and never returned by any read.</p><form id="discord-form"><div class="field"><label>Integration name</label><input class="input" name="name" value="${esc(discord?.name??'Incident Operations')}"></div><div class="field"><label>Discord webhook URL</label><input class="input" name="webhookUrl" type="url" required placeholder="https://discord.com/api/webhooks/…" autocomplete="off"></div><button class="btn btn-primary" type="submit">${discord?'Replace webhook':'Configure Discord'}</button></form></section></div>
+  <div class="grid grid-2 section">
+    <section class="card" data-integration-slack>
+      <div class="section-head"><h2>Slack paging</h2>${slack?.enabled?'<span class="badge state-OPERATIONAL">Enabled</span>':'<span class="badge">Not configured</span>'}</div>
+      <p class="muted">Relay posts one message per page to a Slack Incoming Webhook. Only <code>https://hooks.slack.com/services/…</code> URLs are accepted, the URL is encrypted at rest and it is never returned by any read. Alert text is sanitized so it can never broadcast-mention a channel.</p>
+      <form id="slack-form">
+        <div class="field"><label for="slack-name">Integration name</label><input class="input" id="slack-name" name="name" value="${esc(slack?.name??'Paging')}" maxlength="80"></div>
+        <div class="field"><label for="slack-url">Slack Incoming Webhook URL</label><input class="input" id="slack-url" name="webhookUrl" type="url" required placeholder="https://hooks.slack.com/services/…" autocomplete="off"><span class="subtext">${slack?'A saved webhook is already configured. Submitting replaces it.':'Required the first time Slack is configured.'}</span></div>
+        <div class="toolbar"><button class="btn btn-primary" type="submit">${slack?'Replace webhook':'Configure Slack'}</button>${slack?'<button class="btn btn-danger" type="button" id="slack-remove">Remove integration</button>':''}</div>
+      </form>
+    </section>
+    <section class="card" data-integration-smtp>
+      <div class="section-head"><h2>Email paging (SMTP)</h2>${smtp?.enabled?'<span class="badge state-OPERATIONAL">Enabled</span>':'<span class="badge">Not configured</span>'}</div>
+      <p class="muted">A responder is emailed at their own Relay account address; alert content can never choose a recipient. The password is stored encrypted, is never returned by any read and is never logged. Port 25 and 587 are STARTTLS ports, so implicit TLS must be left off there.</p>
+      <form id="smtp-form">
+        <div class="form-row"><div class="field"><label for="smtp-name">Integration name</label><input class="input" id="smtp-name" name="name" value="${esc(smtp?.name??'Email')}" maxlength="80"></div>
+        <div class="field"><label for="smtp-host">SMTP host</label><input class="input" id="smtp-host" name="host" required value="${esc(smtp?.config?.host??'')}" placeholder="smtp.example.com"></div></div>
+        <div class="form-row"><div class="field"><label for="smtp-port">Port</label><input class="input" id="smtp-port" name="port" type="number" min="1" max="65535" required value="${esc(smtp?.config?.port??587)}"></div>
+        <div class="field"><label>Transport security</label><label class="check"><input type="checkbox" id="smtp-secure" name="secure" ${smtp?.config?.secure?'checked':''}>Implicit TLS (port 465)</label><span class="subtext">Leave off for STARTTLS on 25/587; Relay refuses the combination rather than guessing.</span></div></div>
+        <div class="form-row"><div class="field"><label for="smtp-user">Username</label><input class="input" id="smtp-user" name="username" value="${esc(smtp?.config?.username??'')}" autocomplete="off"></div>
+        <div class="field"><label for="smtp-password">Password ${smtp?.config?.passwordConfigured?'<span class="muted">(stored — leave blank to keep)</span>':''}</label><input class="input" id="smtp-password" name="password" type="password" autocomplete="new-password" ${smtp?.config?.passwordConfigured?'':'required'}></div></div>
+        <div class="form-row"><div class="field"><label for="smtp-from">From address</label><input class="input" id="smtp-from" name="fromEmail" type="email" value="${esc(smtp?.config?.fromEmail??'')}" placeholder="relay@example.com"></div>
+        <div class="field"><label for="smtp-from-name">From name</label><input class="input" id="smtp-from-name" name="fromName" value="${esc(smtp?.config?.fromName??'Relay')}" maxlength="120"></div></div>
+        <div class="toolbar"><button class="btn btn-primary" type="submit">${smtp?'Update SMTP':'Configure SMTP'}</button>${smtp?'<button class="btn btn-danger" type="button" id="smtp-remove">Remove integration</button>':''}</div>
+      </form>
+    </section>
+  </div>${canConfigure()?`<section class="card section"><div class="section-head"><h2>Responder Discord mapping</h2><span>Optional · no OAuth</span></div><p class="muted">Map a Relay user to their numeric Discord user id so routed-alert notifications can mention the person who is actually on call. Without a mapping the notification still names the responder. Values are numeric snowflakes only, so nothing Markdown-bearing can be injected, and webhook secrets are never shown here.</p><div class="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th>Discord user id</th><th></th></tr></thead><tbody>${members.map((m)=>`<tr><td class="name-cell">${esc(m.displayName??'—')}<div class="subtext">${esc(m.email??'')}</div></td><td>${esc(m.role)}</td><td><input class="input discord-map" data-user="${esc(m.userId)}" inputmode="numeric" pattern="[0-9]{15,25}" maxlength="25" placeholder="123456789012345678" value="${esc(identityFor(m.userId))}" aria-label="Discord user id for ${esc(m.displayName??'member')}"></td><td><button class="btn btn-sm" data-save-discord="${esc(m.userId)}">Save</button>${identityFor(m.userId)?`<button class="btn btn-sm btn-danger" data-clear-discord="${esc(m.userId)}">Clear</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">No organization members.</td></tr>'}</tbody></table></div></section>`:''}<section class="card section"><div class="section-head"><h2>API</h2><span>v1</span></div><p class="muted">Relay exposes versioned operations under <code>/api/v1</code>, including alert routing, on-call resolution and acknowledgement. Machine-readable OpenAPI is available at <a href="/api/v1/openapi.json" target="_blank">/api/v1/openapi.json ↗</a>.</p></section>`;
   if(seq!==renderSeq)return;root.innerHTML=shell('Settings',content);bindShell();document.querySelector('#discord-form').addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api(`/api/v1/organizations/${state.orgId}/integrations/discord`,{method:'PUT',body:{name:f.get('name'),webhookUrl:f.get('webhookUrl'),enabled:true}});toast('Discord integration configured.');renderSettings()}catch(error){toast(error.message,'error')}});
   document.querySelectorAll('[data-save-discord]').forEach((btn)=>btn.addEventListener('click',async()=>{const input=document.querySelector(`.discord-map[data-user="${btn.dataset.saveDiscord}"]`);const value=String(input?.value??'').trim();if(!/^[0-9]{15,25}$/.test(value)){toast('Discord user id must be 15-25 digits.','error');input?.focus();return}btn.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/discord-identities/${btn.dataset.saveDiscord}`,{method:'PUT',body:{discordUserId:value}});toast('Discord mapping saved.');renderSettings()}catch(error){toast(error.message,'error');btn.disabled=false}}));
   document.querySelectorAll('[data-clear-discord]').forEach((btn)=>btn.addEventListener('click',async()=>{btn.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/discord-identities/${btn.dataset.clearDiscord}`,{method:'DELETE'});toast('Discord mapping removed.');renderSettings()}catch(error){toast(error.message,'error');btn.disabled=false}}));
+  document.querySelector('#slack-form')?.addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api(`/api/v1/organizations/${state.orgId}/integrations/slack`,{method:'PUT',body:{name:f.get('name'),webhookUrl:f.get('webhookUrl'),enabled:true}});toast('Slack paging configured.');renderSettings()}catch(error){toast(error.message,'error')}});
+  document.querySelector('#slack-remove')?.addEventListener('click',async()=>{if(!confirm('Remove the Slack integration? Queued pages will be recorded as skipped instead of being rerouted.'))return;try{await api(`/api/v1/organizations/${state.orgId}/integrations/slack`,{method:'DELETE'});toast('Slack integration removed.');renderSettings()}catch(error){toast(error.message,'error')}});
+  document.querySelector('#smtp-form')?.addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);const body={name:f.get('name'),host:f.get('host'),port:Number(f.get('port')),secure:f.get('secure')==='on',username:f.get('username')||undefined,fromEmail:f.get('fromEmail')||undefined,fromName:f.get('fromName')||undefined,enabled:true};
+    const password=String(f.get('password')??'');if(password)body.password=password;
+    try{await api(`/api/v1/organizations/${state.orgId}/integrations/smtp`,{method:'PUT',body});toast('SMTP paging configured. Stored credentials are never displayed.');renderSettings()}catch(error){toast(error.message,'error')}});
+  document.querySelector('#smtp-remove')?.addEventListener('click',async()=>{if(!confirm('Remove the SMTP integration? Email pages will be recorded as skipped.'))return;try{await api(`/api/v1/organizations/${state.orgId}/integrations/smtp`,{method:'DELETE'});toast('SMTP integration removed.');renderSettings()}catch(error){toast(error.message,'error')}});
+  const syncSecure=()=>{const port=Number(document.querySelector('#smtp-port')?.value);const secure=document.querySelector('#smtp-secure');if(secure&&(port===25||port===587))secure.checked=false};
+  document.querySelector('#smtp-port')?.addEventListener('change',syncSecure);
   startSse();
 }
 
@@ -184,7 +218,7 @@ const canRespond=()=>['OWNER','ADMIN','RESPONDER'].includes(myRole());
 const fmtTz=(v,tz)=>{if(!v)return'—';try{return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short',timeZone:tz}).format(new Date(v))}catch{return fmt(v)}};
 const durationLabel=(minutes)=>{const m=Number(minutes);if(!Number.isFinite(m))return'—';if(m%10080===0)return`${m/10080} week${m/10080===1?'':'s'}`;if(m%1440===0)return`${m/1440} day${m/1440===1?'':'s'}`;if(m%60===0)return`${m/60} hour${m/60===1?'':'s'}`;return`${m} minutes`};
 const routingLabel=(v)=>({PENDING:'Not evaluated',ROUTED:'Routed',NO_MATCHING_RULE:'No matching rule',SCHEDULE_DISABLED:'Schedule disabled',SCHEDULE_MISSING:'Schedule missing',ROTATION_NOT_STARTED:'Rotation not started',NO_PARTICIPANTS:'No participants',RULE_TARGET_MISSING:'Target missing'}[v]??v??'—');
-const notifyLabel=(v)=>({NOT_ATTEMPTED:'Not attempted',SENT:'Notified',FAILED:'Delivery failed',SKIPPED_NO_INTEGRATION:'No Discord integration',SKIPPED_DISABLED:'Discord disabled',SKIPPED_NO_RESPONDER:'No responder to notify'}[v]??v??'—');
+const notifyLabel=(v)=>({NOT_ATTEMPTED:'Not attempted',SENT:'Notified',FAILED:'Delivery failed',SKIPPED_NO_INTEGRATION:'No integration for this channel',SKIPPED_DISABLED:'Channel disabled',SKIPPED_NO_RESPONDER:'No responder to notify'}[v]??v??'—');
 const badgeRouting=(v)=>`<span class="badge route-${esc(v??'NONE')}"><span class="dot"></span>${esc(routingLabel(v))}</span>`;
 const badgeNotify=(v)=>`<span class="badge notify-${esc(v??'NONE')}">${esc(notifyLabel(v))}</span>`;
 const badgeAck=(routing)=>routing?.acknowledgedAt?`<span class="badge ack-yes"><span class="dot"></span>Acknowledged</span>`:`<span class="badge ack-no"><span class="dot"></span>Unacknowledged</span>`;
@@ -216,7 +250,7 @@ async function renderAlerts(seq=++renderSeq){
     if(canRespond()&&(!r||r.resolution!=='ROUTED'))actions.push(`<button class="btn btn-sm" data-reroute="${esc(a.id)}">Re-route</button>`);
     return `<tr>
       <td class="nowrap">${esc(ago(a.receivedAt))}<div class="subtext">${esc(fmt(a.receivedAt))}</div></td>
-      <td class="name-cell">${esc(a.title)}<div class="subtext">${esc(a.source)}${a.externalId?` · ${esc(a.externalId)}`:''}</div></td>
+      <td class="name-cell"><a data-nav href="/app/alerts/${esc(a.id)}">${esc(a.title)}</a><div class="subtext">${esc(a.source)}${a.externalId?` · ${esc(a.externalId)}`:''}</div></td>
       <td>${badgeSeverity(String(a.severity).toUpperCase().startsWith('SEV')?String(a.severity).toUpperCase():'SEV3')}<div class="subtext">${esc(a.severity)}</div></td>
       <td>${esc(a.serviceName??'—')}</td>
       <td>${r?badgeRouting(r.resolution):'<span class="badge">Not evaluated</span>'}<div class="subtext">${r?[r.ruleName,r.scheduleName,r.teamName].filter(Boolean).map(esc).join(' → ')||'—':'—'}</div></td>
@@ -378,16 +412,18 @@ function overrideModal(scheduleId,members,schedule){
 }
 
 async function renderRouting(seq=++renderSeq){
-  const [rules,schedules,services]=await Promise.all([
+  const [rules,schedules,services,policies]=await Promise.all([
     api(`/api/v1/organizations/${state.orgId}/routing-rules`),
     api(`/api/v1/organizations/${state.orgId}/oncall/schedules`),
-    api(`/api/v1/organizations/${state.orgId}/services`)
+    api(`/api/v1/organizations/${state.orgId}/services`),
+    api(`/api/v1/organizations/${state.orgId}/escalation-policies`).catch(()=>[])
   ]);
   const scheduleOptions=schedules.oncall.map((s)=>`<option value="${esc(s.schedule.id)}">${esc(s.schedule.name)}${s.current.resolved?` — ${esc(s.current.displayName??'')}`:' — no responder'}</option>`).join('');
   const rows=rules.map((rule,index)=>`<tr>
     <td class="name-cell">${rule.priority}<div class="subtext">evaluates #${index+1}</div></td>
     <td class="name-cell">${esc(rule.name)}<div class="subtext">${esc(ruleSummary(rule,services))}</div></td>
     <td>${esc(rule.scheduleName??'Missing schedule')}<div class="subtext">On-call schedule</div></td>
+    <td>${(rule.notificationChannels??['DISCORD']).map((c)=>`<span class="chip">${esc(providerLabel(c))}</span>`).join('')}<div class="subtext">${esc(rule.escalationPolicyName??'No escalation policy')}</div></td>
     <td>${badgeBool(rule.enabled,'Enabled','Disabled')}</td>
     <td><div class="toolbar">
       ${canConfigure()?`<button class="btn btn-sm" data-toggle-rule="${esc(rule.id)}" data-enabled="${rule.enabled?'true':'false'}">${rule.enabled?'Disable':'Enable'}</button>
@@ -404,25 +440,159 @@ async function renderRouting(seq=++renderSeq){
     <div class="field"><label for="rule-source">Alert source</label><input class="input" id="rule-source" name="matchSource" maxlength="120" placeholder="Any source, e.g. grafana-webhook"><span class="subtext">Case-insensitive exact match.</span></div></div>
     <div class="field"><label>Severities</label><div class="check-grid" id="rule-severities">${['critical','warning','info','page','sev1','sev2','sev3','sev4'].map((s)=>`<label class="check"><input type="checkbox" name="severity" value="${esc(s)}">${esc(s)}</label>`).join('')}</div><span class="subtext">Leave empty to match any severity.</span></div>
     <div class="field"><label for="rule-target">Route to on-call schedule</label><select class="select" id="rule-target" name="targetScheduleId" required>${scheduleOptions||'<option value="">No schedules yet</option>'}</select></div>
+    <div class="field"><label>Notification channels</label><div class="check-grid" id="notification-channels">${['DISCORD','SLACK','EMAIL'].map((c)=>`<label class="check"><input type="checkbox" name="channel" value="${c}" ${c==='DISCORD'?'checked':''}>${esc(providerLabel(c))}</label>`).join('')}</div><span class="subtext">Each channel needs its own integration. A channel that is not configured is recorded as skipped — a page is never silently rerouted to another provider.</span></div>
+    <div class="field"><label for="rule-policy">Escalation policy</label><select class="select" id="rule-policy" name="escalationPolicyId"><option value="">No escalation — page the on-call responder once</option>${policies.map((p)=>`<option value="${esc(p.id)}">${esc(p.name)} (${(p.steps??[]).length} step${(p.steps??[]).length===1?'':'s'})</option>`).join('')}</select><span class="subtext">Steps run until someone acknowledges the alert; an acknowledgement cancels steps that have not reached a provider.</span></div>
     <button class="btn btn-primary" type="submit" ${schedules.oncall.length?'':'disabled'}>Create rule</button>
     ${schedules.oncall.length?'':'<p class="muted">Create a responder team and an on-call schedule first.</p>'}
   </form>`:''}
-  <div class="table-wrap">${rules.length?`<table><thead><tr><th>Priority</th><th>Rule</th><th>Routes to</th><th>State</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`:empty('No routing rules','Alerts are stored durably but stay unrouted until a rule matches.')}</div>`;
+  <div class="table-wrap">${rules.length?`<table><thead><tr><th>Priority</th><th>Rule</th><th>Routes to</th><th>Channels / escalation</th><th>State</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`:empty('No routing rules','Alerts are stored durably but stay unrouted until a rule matches.')}</div>
+  <section class="section"><div class="section-head"><h2>Escalation policies</h2><span>Steps run in order until acknowledgement</span></div>
+  ${policies.length?`<div class="grid grid-2">${policies.map((p)=>`<article class="card"><div class="section-head"><div><h3>${esc(p.name)}</h3><span class="subtext">${esc(p.description||'No description')}</span></div>${badgeBool(p.enabled!==false,'Enabled','Disabled')}</div><ol class="rotation-list">${(p.steps??[]).map((step)=>`<li data-policy-step="${esc(p.id)}:${esc(step.position)}"><span class="rotation-pos">${esc(step.position+1)}</span><strong>after ${esc(durationLabel(step.afterMinutes))}</strong><span class="subtext">${esc(step.scheduleName??'schedule')} · ${(step.channels??[]).map((c)=>esc(providerLabel(c))).join(', ')}</span></li>`).join('')||'<li class="muted">No steps</li>'}</ol></article>`).join('')}</div>`:empty('No escalation policies','Create a policy, then attach it to a routing rule.')}
+  ${canConfigure()?`<form id="policy-form" class="card">
+    <div class="section-head"><h2>New escalation policy</h2><span>Ordered steps, each with its own schedule and channels</span></div>
+    <div class="form-row"><div class="field"><label for="policy-name">Policy name</label><input class="input" id="policy-name" name="name" required minlength="2" placeholder="Critical incident escalation"></div>
+    <div class="field"><label for="policy-desc">Description</label><input class="input" id="policy-desc" name="description" placeholder="Page the secondary after 10 minutes"></div></div>
+    <div id="policy-steps"></div>
+    <div class="toolbar"><button type="button" id="add-policy-step" class="btn btn-sm">Add step</button><button class="btn btn-primary" type="submit">Create policy</button></div>
+    <span class="subtext">A step whose schedule resolves nobody is recorded as unresolved; it is never retried into a page for the wrong person.</span>
+  </form>`:''}
+  </section>`;
   if(seq!==renderSeq)return;
   root.innerHTML=shell('Routing',content);bindShell();
   document.querySelector('#rule-form')?.addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);
-    try{await api(`/api/v1/organizations/${state.orgId}/routing-rules`,{method:'POST',body:{name:f.get('name'),priority:Number(f.get('priority')),matchServiceId:f.get('matchServiceId')||null,matchSource:f.get('matchSource')||null,matchSeverities:f.getAll('severity'),targetScheduleId:f.get('targetScheduleId')}});toast('Routing rule created.');renderRouting()}catch(error){toast(error.message,'error')}});
+    const channels=f.getAll('channel');if(!channels.length){toast('Select at least one notification channel.','error');return}
+    try{await api(`/api/v1/organizations/${state.orgId}/routing-rules`,{method:'POST',body:{name:f.get('name'),priority:Number(f.get('priority')),matchServiceId:f.get('matchServiceId')||null,matchSource:f.get('matchSource')||null,matchSeverities:f.getAll('severity'),targetScheduleId:f.get('targetScheduleId'),notificationChannels:channels,escalationPolicyId:f.get('escalationPolicyId')||null}});toast('Routing rule created.');renderRouting()}catch(error){toast(error.message,'error')}});
   document.querySelectorAll('[data-toggle-rule]').forEach((btn)=>btn.addEventListener('click',async()=>{btn.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/routing-rules/${btn.dataset.toggleRule}`,{method:'PATCH',body:{enabled:btn.dataset.enabled!=='true'}});toast('Rule updated.');renderRouting()}catch(error){toast(error.message,'error');btn.disabled=false}}));
   document.querySelectorAll('[data-priority]').forEach((btn)=>btn.addEventListener('click',async()=>{const rule=rules.find((r)=>r.id===btn.dataset.priority);if(!rule)return;btn.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/routing-rules/${rule.id}`,{method:'PATCH',body:{priority:Math.max(0,Math.min(100000,rule.priority+Number(btn.dataset.delta)))}});renderRouting()}catch(error){toast(error.message,'error');btn.disabled=false}}));
   document.querySelectorAll('[data-delete-rule]').forEach((btn)=>btn.addEventListener('click',async()=>{if(!confirm('Delete this routing rule? Existing routing history is preserved.'))return;btn.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/routing-rules/${btn.dataset.deleteRule}`,{method:'DELETE'});toast('Routing rule deleted.');renderRouting()}catch(error){toast(error.message,'error');btn.disabled=false}}));
+  const stepsBox=document.querySelector('#policy-steps');
+  const scheduleChoices=schedules.oncall.map((s)=>`<option value="${esc(s.schedule.id)}">${esc(s.schedule.name)}</option>`).join('');
+  const addStep=()=>{if(!stepsBox)return;const index=stepsBox.children.length;const row=document.createElement('div');row.className='form-row policy-step';row.dataset.stepIndex=String(index);
+    row.innerHTML=`<div class="field"><label>Step ${index+1} · after (minutes)</label><input class="input" name="afterMinutes" type="number" min="0" max="10080" step="1" value="${index===0?5:15}"></div>
+    <div class="field"><label>Schedule</label><select class="select" name="stepSchedule" required>${scheduleChoices||'<option value="">No schedules yet</option>'}</select></div>
+    <div class="field"><label>Channels</label><div class="check-grid">${['DISCORD','SLACK','EMAIL'].map((c)=>`<label class="check"><input type="checkbox" name="stepChannel" value="${c}" ${c==='DISCORD'?'checked':''}>${esc(providerLabel(c))}</label>`).join('')}</div></div>`;
+    stepsBox.append(row)};
+  document.querySelector('#add-policy-step')?.addEventListener('click',addStep);
+  if(stepsBox&&scheduleChoices)addStep();
+  document.querySelector('#policy-form')?.addEventListener('submit',async(e)=>{e.preventDefault();const form=e.currentTarget;const name=form.querySelector('#policy-name').value;
+    const steps=[...form.querySelectorAll('.policy-step')].map((row,index)=>({position:index,afterMinutes:Number(row.querySelector('[name=afterMinutes]').value),targetScheduleId:row.querySelector('[name=stepSchedule]').value,channels:[...row.querySelectorAll('[name=stepChannel]')].filter((c)=>c.checked).map((c)=>c.value)}));
+    if(!steps.length){toast('Add at least one escalation step.','error');return}
+    if(steps.some((step)=>!step.targetScheduleId)){toast('Every step needs an on-call schedule.','error');return}
+    if(steps.some((step)=>!step.channels.length)){toast('Every step needs at least one channel.','error');return}
+    try{await api(`/api/v1/organizations/${state.orgId}/escalation-policies`,{method:'POST',body:{name,description:form.querySelector('#policy-desc').value,enabled:true,steps}});toast('Escalation policy created.');renderRouting()}catch(error){toast(error.message,'error')}});
   startSse();
+}
+
+
+// ---------------------------------------------------------------------------
+// Relay 0.2 / RLY-0.2-M-002 — durable delivery and escalation surfaces.
+// ---------------------------------------------------------------------------
+const providerLabel=(v)=>({DISCORD:'Discord',SLACK:'Slack',EMAIL:'Email'}[v]??v??'—');
+const deliveryStateLabel=(v)=>({PENDING:'Queued',IN_FLIGHT:'Sending',RETRYING:'Retry scheduled',SENT:'Sent',FAILED:'Delivery failed',CANCELLED:'Cancelled'}[v]??v??'—');
+const attemptLabel=(v)=>({SENT:'Delivered',RETRYABLE_FAILURE:'Retryable failure',PERMANENT_FAILURE:'Permanent failure'}[v]??v??'—');
+const escalationStateLabel=(v)=>({PENDING:'Scheduled',IN_FLIGHT:'Executing',COMPLETED:'Executed',FAILED:'Unresolved',CANCELLED_ACKNOWLEDGED:'Cancelled (acknowledged)'}[v]??v??'—');
+const badgeDelivery=(v)=>`<span class="badge delivery-${esc(v??'NONE')}"><span class="dot"></span>${esc(deliveryStateLabel(v))}</span>`;
+const badgeEscalation=(v)=>`<span class="badge escalation-${esc(v??'NONE')}"><span class="dot"></span>${esc(escalationStateLabel(v))}</span>`;
+const destinationLabel=(delivery)=>{const d=delivery?.destination??{};if(delivery?.provider==='EMAIL')return d.to?`to ${d.to}`:(d.integrationName??'email');return d.integrationName?`${d.integrationName}`:(d.kind??'')};
+// A failed page is retryable by a responder; a delivered or cancelled one is not.
+const deliveryRetryable=(delivery)=>canRespond()&&['FAILED','RETRYING','PENDING'].includes(delivery.status)&&delivery.status!=='SENT'&&delivery.status!=='CANCELLED';
+
+function attemptTrail(delivery){
+  const attempts=delivery.attempts??[];
+  if(!attempts.length)return '<span class="muted">No provider call has been made.</span>';
+  return `<ol class="attempt-list">${attempts.map((a)=>`<li><span class="rotation-pos">${esc(a.attemptNumber)}</span><strong>${esc(attemptLabel(a.outcome))}</strong><span class="subtext">${esc(fmt(a.completedAt??a.startedAt))}${a.providerStatusCode?` · HTTP ${esc(a.providerStatusCode)}`:''}${a.manualRetryByUserId?' · manual retry':''}${a.safeError?` · ${esc(a.safeError)}`:''}</span></li>`).join('')}</ol>`;
+}
+
+function deliveryTable(deliveries,emptyTitle,emptyText){
+  if(!deliveries.length)return empty(emptyTitle,emptyText);
+  return `<div class="table-wrap table-scroll-x"><table><thead><tr><th>Channel</th><th>Responder</th><th>State</th><th>Attempts</th><th>Next attempt</th><th>Detail</th><th></th></tr></thead><tbody>${deliveries.map((d)=>`<tr data-delivery="${esc(d.id)}">
+    <td class="name-cell">${esc(providerLabel(d.provider))}<div class="subtext">${esc(destinationLabel(d))}</div></td>
+    <td>${esc(d.responderDisplayName??'—')}</td>
+    <td>${badgeDelivery(d.status)}<div class="subtext">${esc(deliveryStateLabel(d.status))}</div></td>
+    <td>${esc(d.attemptCount??0)}<div class="subtext">${attemptTrail(d)}</div></td>
+    <td class="nowrap">${d.nextAttemptAt?esc(fmt(d.nextAttemptAt)):'—'}</td>
+    <td>${d.lastError?esc(d.lastError):'—'}</td>
+    <td>${deliveryRetryable(d)?`<button class="btn btn-sm" data-delivery-retry="${esc(d.id)}">Retry</button>`:''}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function renderAlertDetail(alertId,seq=++renderSeq){
+  const alert=await api(`/api/v1/organizations/${state.orgId}/alerts/${alertId}`);
+  const routing=alert.routing;
+  const escalation=alert.escalation??{steps:[],immediateDeliveries:[],planned:0,executed:0,cancelled:0,unresolved:0,due:false,policyName:null,nextDueAt:null};
+  const deliveries=alert.deliveries??[];
+  const summary=alert.deliverySummary??{label:'No delivery',attempts:0,total:0};
+  const failed=deliveries.filter((d)=>d.status==='FAILED').length;
+  const actions=[];
+  if(canRespond()&&routing&&!routing.acknowledgedAt)actions.push(`<button id="detail-ack" class="btn btn-primary">Acknowledge</button>`);
+  if(canRespond()&&(!routing||routing.resolution!=='ROUTED'))actions.push(`<button id="detail-reroute" class="btn">Re-route</button>`);
+  if(canRespond()&&!routing?.incidentId)actions.push(`<button id="detail-incident" class="btn">Create incident</button>`);
+  const stepRows=escalation.steps.length?escalation.steps.map((step)=>`<article class="card escalation-step" data-escalation-step="${esc(step.id)}">
+    <div class="section-head"><div><h3>Step ${esc(step.position+1)} · after ${esc(durationLabel(step.afterMinutes))}</h3><span class="subtext">${esc(step.targetScheduleName??'Schedule removed')} · ${(step.channels??[]).map((c)=>esc(providerLabel(c))).join(', ')||'no channel'}</span></div>${badgeEscalation(step.state)}</div>
+    <div class="meta-row"><span>Due ${esc(fmt(step.dueAt))}</span>${step.executedAt?`<span>Executed ${esc(fmt(step.executedAt))}</span>`:''}${step.resolvedResponder?`<span>Resolved ${esc(step.resolvedResponder.displayName??'responder')}</span>`:''}</div>
+    ${step.outcome?.reason?`<p class="muted">${esc(step.outcome.reason==='SCHEDULE_MISSING'?'The target schedule no longer exists.':step.outcome.reason==='ACKNOWLEDGED'?'Cancelled because the alert was acknowledged.':step.outcome.reason)}${step.outcome.targetScheduleName?` · ${esc(step.outcome.targetScheduleName)}`:''}</p>`:''}
+    ${step.deliveries?.length?`<div class="subtext">${step.deliveries.map((d)=>`${esc(providerLabel(d.provider))}: ${esc(deliveryStateLabel(d.status))}${d.lastError?` — ${esc(d.lastError)}`:''}`).join(' · ')}</div>`:''}
+  </article>`).join(''):empty('No escalation configured','This alert has no escalation policy; only the immediate page applies.');
+  const content=`<div class="page-head"><div>
+      <div class="incident-title-row"><h1>${esc(alert.title)}</h1>${badgeSeverity(String(alert.severity).toUpperCase().startsWith('SEV')?String(alert.severity).toUpperCase():'SEV3')}</div>
+      <div class="meta-row"><span>Source ${esc(alert.source)}</span>${alert.externalId?`<span>External id ${esc(alert.externalId)}</span>`:''}<span>Received ${esc(fmt(alert.receivedAt))}</span><span>Service ${esc(alert.serviceName??'—')}</span></div>
+    </div><div class="toolbar">${actions.join('')}</div></div>
+  <section class="summary-strip" aria-label="Alert state summary">
+    <div class="summary-item"><span class="summary-label">Routing</span><strong>${esc(routingLabel(routing?.resolution))}</strong><span class="summary-hint">${esc([routing?.ruleName,routing?.scheduleName].filter(Boolean).join(' → ')||'No rule matched')}</span></div>
+    <div class="summary-item"><span class="summary-label">On call</span><strong>${esc(routing?.oncallDisplayName??'—')}</strong><span class="summary-hint">${esc(notifyLabel(routing?.notificationStatus))}</span></div>
+    <div class="summary-item"><span class="summary-label">Deliveries</span><strong>${esc(deliveryStateLabel(deliveries[0]?.status))}</strong><span class="summary-hint">${esc(summary.label)} · ${esc(deliveries.length)} channel${deliveries.length===1?'':'s'}${failed?` · ${failed} failed`:''}</span></div>
+    <div class="summary-item"><span class="summary-label">Escalation</span><strong>${esc(escalation.policyName??'None')}</strong><span class="summary-hint">${esc(`${escalation.executed}/${escalation.planned} executed${escalation.cancelled?` · ${escalation.cancelled} cancelled`:''}${escalation.unresolved?` · ${escalation.unresolved} unresolved`:''}`)}</span></div>
+  </section>
+  <section class="section"><div class="section-head"><h2>Immediate page</h2><span>Created when the alert was routed</span></div>${deliveryTable(deliveries,'No page created','No delivery was created for this alert.')}</section>
+  <section class="section"><div class="section-head"><h2>Escalation plan</h2><span>${esc(escalation.planned)} planned${escalation.due?' · next step due':''}</span></div><div class="grid grid-2">${stepRows}</div></section>
+  <section class="section"><div class="section-head"><h2>Acknowledgement</h2></div><p class="muted">${routing?.acknowledgedAt?`Acknowledged by ${esc(routing.acknowledgedByDisplayName??'a responder')} ${esc(ago(routing.acknowledgedAt))}. Any queued page that has not reached a provider is cancelled; delivered history is kept.`:'Not acknowledged. Escalation steps keep executing until a responder acknowledges.'}</p></section>`;
+  if(seq!==renderSeq)return;
+  root.innerHTML=shell('Alert detail',content,`<a data-nav href="/app/alerts" class="btn btn-ghost">← Alerts</a>`);bindShell();
+  document.querySelector('#detail-ack')?.addEventListener('click',async(e)=>{e.currentTarget.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/alerts/${alert.id}/acknowledge`,{method:'POST',body:{}});toast('Alert acknowledged. Unsent pages were cancelled.');renderAlertDetail(alert.id)}catch(error){toast(error.message,'error')}});
+  document.querySelector('#detail-reroute')?.addEventListener('click',async(e)=>{e.currentTarget.disabled=true;try{await api(`/api/v1/organizations/${state.orgId}/alerts/${alert.id}/route`,{method:'POST',body:{}});toast('Routing re-evaluated.');renderAlertDetail(alert.id)}catch(error){toast(error.message,'error')}});
+  document.querySelector('#detail-incident')?.addEventListener('click',()=>escalateAlertModal({...alert,id:alert.id}));
+  document.querySelectorAll('[data-delivery-retry]').forEach((btn)=>btn.addEventListener('click',async()=>{btn.disabled=true;try{const delivery=await api(`/api/v1/organizations/${state.orgId}/deliveries/${btn.dataset.deliveryRetry}/retry`,{method:'POST',body:{}});toast(`Retry recorded: ${deliveryStateLabel(delivery.status)}.`);renderAlertDetail(alert.id)}catch(error){toast(error.message,'error');btn.disabled=false}}));
+  startSse();
+}
+
+async function renderEscalations(seq=++renderSeq){
+  const alerts=await api(`/api/v1/organizations/${state.orgId}/alerts`);
+  // The overview is bounded on purpose: it reads persisted escalation state for
+  // the most recent alerts rather than re-resolving any on-call rotation.
+  const recent=alerts.filter((a)=>a.routing).slice(0,12);
+  const states=await Promise.all(recent.map((a)=>api(`/api/v1/organizations/${state.orgId}/alerts/${a.id}/escalation`).catch(()=>null)));
+  const rows=[];
+  states.forEach((state,index)=>{if(!state)return;const alert=recent[index];
+    for(const step of state.steps??[])rows.push({alert,step,policyName:state.policyName});
+  });
+  const pending=rows.filter((r)=>r.step.state==='PENDING').sort((a,b)=>String(a.step.dueAt).localeCompare(String(b.step.dueAt)));
+  const finished=rows.filter((r)=>r.step.state!=='PENDING');
+  const stepRow=(r)=>`<tr data-escalation-step="${esc(r.step.id)}">
+    <td class="nowrap">${esc(fmt(r.step.dueAt))}<div class="subtext">${r.step.state==='PENDING'?`in ${esc(ago(r.step.dueAt).replace(' ago',''))}`:esc(ago(r.step.executedAt??r.step.dueAt))}</div></td>
+    <td class="name-cell"><a data-nav href="/app/alerts/${esc(r.alert.id)}">${esc(r.alert.title)}</a><div class="subtext">${esc(r.policyName??'Policy')} · step ${esc(r.step.position+1)}</div></td>
+    <td>${esc(r.step.targetScheduleName??'—')}<div class="subtext">${(r.step.channels??[]).map((c)=>esc(providerLabel(c))).join(', ')||'no channel'}</div></td>
+    <td>${badgeEscalation(r.step.state)}${r.step.resolvedResponder?`<div class="subtext">${esc(r.step.resolvedResponder.displayName??'responder')}</div>`:''}</td>
+    <td>${r.step.deliveries?.length?r.step.deliveries.map((d)=>`<span class="chip">${esc(providerLabel(d.provider))} · ${esc(deliveryStateLabel(d.status))}</span>`).join(''):'<span class="muted">No page created</span>'}</td></tr>`;
+  const content=`<div class="page-head"><div><h1>Escalations</h1><p>Persisted escalation jobs for the most recent routed alerts: what is due, what executed, which responder was resolved at execution time, and what an acknowledgement cancelled.</p></div></div>
+  <section class="summary-strip" aria-label="Escalation summary">
+    <div class="summary-item"><span class="summary-label">Scheduled</span><strong>${pending.length}</strong><span class="summary-hint">Steps still due</span></div>
+    <div class="summary-item"><span class="summary-label">Executed</span><strong>${finished.filter((r)=>r.step.state==='COMPLETED').length}</strong><span class="summary-hint">Pages created by a step</span></div>
+    <div class="summary-item"><span class="summary-label">Cancelled</span><strong>${finished.filter((r)=>r.step.state==='CANCELLED_ACKNOWLEDGED').length}</strong><span class="summary-hint">Stopped by acknowledgement</span></div>
+    <div class="summary-item"><span class="summary-label">Unresolved</span><strong>${finished.filter((r)=>r.step.state==='FAILED').length}</strong><span class="summary-hint">No responder on call at execution</span></div>
+  </section>
+  <section class="section"><div class="section-head"><h2>Due and scheduled steps</h2><span>${pending.length}</span></div>
+  <div class="table-wrap table-scroll-x">${pending.length?`<table><thead><tr><th>Due</th><th>Alert</th><th>Target</th><th>State</th><th>Pages</th></tr></thead><tbody>${pending.map(stepRow).join('')}</tbody></table>`:empty('Nothing scheduled','No escalation step is currently waiting.')}</div></section>
+  <section class="section"><div class="section-head"><h2>Executed and cancelled steps</h2><span>${finished.length}</span></div>
+  <div class="table-wrap table-scroll-x">${finished.length?`<table><thead><tr><th>Time</th><th>Alert</th><th>Target</th><th>State</th><th>Pages</th></tr></thead><tbody>${finished.slice(0,40).map(stepRow).join('')}</tbody></table>`:empty('No executed steps','Escalation steps appear here once they run.')}</div></section>
+  <p class="muted">Showing the ${recent.length} most recent routed alerts. Reading this page never re-resolves who is on call.</p>`;
+  if(seq!==renderSeq)return;
+  root.innerHTML=shell('Escalations',content);bindShell();startSse();
 }
 
 let renderSeq=0;
 
 async function renderRoute(){
   const seq=++renderSeq;const path=location.pathname;if(path.startsWith('/status/'))return renderPublic();if(path==='/signin')return authLayout('login');if(path==='/register')return authLayout('register');await ensureMe();if(seq!==renderSeq)return;if(!state.me){return navigate('/signin')}if(!state.orgs.length)return renderOnboarding();if(!state.orgId){state.orgId=state.orgs[0].id;localStorage.setItem('relay.orgId',state.orgId)}
-  if(path==='/app'||path==='/')return renderDashboard(seq);if(path==='/app/alerts')return renderAlerts(seq);if(path==='/app/oncall')return renderOnCall(seq);if(path==='/app/teams')return renderTeams(seq);if(path==='/app/routing')return renderRouting(seq);if(path==='/app/services')return renderServices(seq);if(path==='/app/components')return renderComponents(seq);if(path==='/app/incidents')return renderIncidents(seq);const incident=path.match(/^\/app\/incidents\/([a-zA-Z0-9_-]+)$/);if(incident)return renderIncident(incident[1],seq);if(path==='/app/status-pages')return renderStatusPages(seq);if(path==='/app/settings')return renderSettings(seq);navigate('/app');
+  if(path==='/app'||path==='/')return renderDashboard(seq);if(path==='/app/alerts')return renderAlerts(seq);if(path==='/app/escalations')return renderEscalations(seq);const alertDetail=path.match(/^\/app\/alerts\/([a-zA-Z0-9_-]+)$/);if(alertDetail)return renderAlertDetail(alertDetail[1],seq);if(path==='/app/oncall')return renderOnCall(seq);if(path==='/app/teams')return renderTeams(seq);if(path==='/app/routing')return renderRouting(seq);if(path==='/app/services')return renderServices(seq);if(path==='/app/components')return renderComponents(seq);if(path==='/app/incidents')return renderIncidents(seq);const incident=path.match(/^\/app\/incidents\/([a-zA-Z0-9_-]+)$/);if(incident)return renderIncident(incident[1],seq);if(path==='/app/status-pages')return renderStatusPages(seq);if(path==='/app/settings')return renderSettings(seq);navigate('/app');
 }
 
 renderRoute().catch(handleFatal);

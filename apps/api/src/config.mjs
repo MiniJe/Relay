@@ -10,6 +10,12 @@ export function loadConfig(env = process.env) {
     integrationEncryptionKey: env.INTEGRATION_ENCRYPTION_KEY ?? '',
     staticDir: env.RELAY_STATIC_DIR ?? new URL('../../web/public/', import.meta.url).pathname,
     trustProxy: env.TRUST_PROXY === 'true',
+    // Durable delivery worker. The lifecycle is owned by the server process;
+    // the core (`processDueWork`) is driven directly by the qualification tests.
+    workerEnabled: env.RELAY_WORKER_ENABLED !== 'false',
+    workerIntervalMs: Number(env.RELAY_WORKER_INTERVAL_MS ?? 15_000),
+    workerBatchSize: Number(env.RELAY_WORKER_BATCH_SIZE ?? 20),
+    workerLeaseSeconds: Number(env.RELAY_WORKER_LEASE_SECONDS ?? 120),
     cookieSecure: env.COOKIE_SECURE === 'true' || (env.COOKIE_SECURE === undefined && (env.NODE_ENV ?? 'development') === 'production')
   };
 }

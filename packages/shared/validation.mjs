@@ -272,6 +272,8 @@ export function overrideInput(body) {
 
 export function routingRuleInput(body) {
   body = object(body);
+  const channels = body.notificationChannels ?? ['DISCORD'];
+  if (!Array.isArray(channels) || !channels.length || channels.some((channel) => !['DISCORD', 'SLACK', 'EMAIL'].includes(channel)) || new Set(channels).size !== channels.length) throw domainError('VALIDATION_ERROR', 'notificationChannels must contain unique supported channels.', 400);
   return {
     name: string(body.name, 'name', { min: 2, max: 160 }),
     enabled: booleanValue(body.enabled, 'enabled', { fallback: true }),
@@ -280,7 +282,81 @@ export function routingRuleInput(body) {
     matchSource: body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null,
     matchSeverities: severityTokens(body.matchSeverities),
     targetKind: enumValue(body.targetKind ?? 'ONCALL_SCHEDULE', 'targetKind', ['ONCALL_SCHEDULE']),
-    targetScheduleId: id(body.targetScheduleId, 'targetScheduleId')
+    targetScheduleId: id(body.targetScheduleId, 'targetScheduleId'),
+    notificationChannels: [...channels],
+    escalationPolicyId: body.escalationPolicyId ? id(body.escalationPolicyId, 'escalationPolicyId') : null
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Relay 0.2 / RLY-0.2-M-002 — outbound integration configuration.
+//
+// Slack and SMTP both accept operator-supplied text that ends up in a header
+// or a provider payload, so the validators below reject CR, LF and NUL (all
+// three are header-injection primitives) and cap every field length.
+// ---------------------------------------------------------------------------
+
+/** Reject control characters, CR/LF and UTF-8 line separators in header-bound text. */
+export function headerSafe(value, name, { min = 1, max = 200, optional = false } = {}) {
+  const raw = string(value, name, { min, max, optional });
+  if (raw === undefined) return undefined;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f\u2028\u2029]/.test(raw)) throw domainError('VALIDATION_ERROR', `${name} must not contain control characters or line breaks.`, 400);
+  return raw;
+}
+
+/** Same rules as an email address, but for mailbox display purposes. */
+export function headerSafeEmail(value, name = 'email') {
+  const raw = headerSafe(email(value), name, { min: 3, max: 320 });
+  return raw;
+}
+
+/**
+ * Only Slack Incoming Webhook endpoints are accepted. An arbitrary URL is
+ * rejected before it can ever be stored, so Relay can never be pointed at an
+ * internal service or an attacker-controlled host through the integration API.
+ */
+export function slackWebhookUrl(value) {
+  const raw = string(value, 'webhookUrl', { min: 20, max: 1000 });
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw domainError('VALIDATION_ERROR', 'webhookUrl must be a valid URL.', 400); }
+  if (parsed.protocol !== 'https:') throw domainError('VALIDATION_ERROR', 'Only HTTPS Slack webhook URLs are supported.', 400);
+  if (parsed.hostname !== 'hooks.slack.com') throw domainError('VALIDATION_ERROR', 'Only Slack Incoming Webhook URLs on hooks.slack.com are supported.', 400);
+  if (!/^\/services\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/.test(parsed.pathname)) throw domainError('VALIDATION_ERROR', 'The URL is not a Slack Incoming Webhook path.', 400);
+  if (parsed.search || parsed.hash) throw domainError('VALIDATION_ERROR', 'A Slack Incoming Webhook URL must not carry a query string or fragment.', 400);
+  return raw;
+}
+
+/** Organization-scoped SMTP transport configuration. Secrets are never part of this shape. */
+export function smtpIntegrationInput(body) {
+  body = object(body);
+  const host = headerSafe(body.host, 'host', { min: 1, max: 253 }).toLowerCase();
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host) && !/^\[[0-9a-fA-F:]+\]$/.test(host)) {
+    throw domainError('VALIDATION_ERROR', 'host must be a hostname or an IP literal.', 400);
+  }
+  const port = integer(body.port, 'port', { min: 1, max: 65535 });
+  const secure = booleanValue(body.secure, 'secure', { fallback: port === 465 });
+  if (secure && [25, 587].includes(port)) {
+    throw domainError('VALIDATION_ERROR', `secure:true selects implicit TLS, but port ${port} is a STARTTLS port. Use secure:false for port ${port}.`, 400);
+  }
+  const username = body.username ? headerSafe(body.username, 'username', { max: 320 }) : null;
+  const password = body.password === undefined || body.password === null || body.password === '' ? undefined : string(body.password, 'password', { min: 1, max: 500 });
+  if (password !== undefined && /[\r\n]/.test(password)) throw domainError('VALIDATION_ERROR', 'password must not contain line breaks.', 400);
+  if (username && password === undefined && body.keepExistingPassword !== true) {
+    throw domainError('VALIDATION_ERROR', 'A password is required when a username is configured.', 400);
+  }
+  const fromEmail = body.fromEmail ? headerSafeEmail(body.fromEmail, 'fromEmail')
+    : username && username.includes('@') ? headerSafeEmail(username, 'fromEmail')
+      : undefined;
+  if (!fromEmail) throw domainError('VALIDATION_ERROR', 'fromEmail is required.', 400);
+  return {
+    host, port, secure,
+    username,
+    password,
+    fromEmail,
+    fromName: headerSafe(body.fromName ?? 'Relay', 'fromName', { min: 0, max: 120, optional: true }) ?? null,
+    enabled: booleanValue(body.enabled, 'enabled', { fallback: true }),
+    timeoutMs: integer(body.timeoutMs ?? 10_000, 'timeoutMs', { min: 1_000, max: 120_000 })
   };
 }
 
@@ -294,5 +370,11 @@ export function routingRulePatch(body) {
   if ('matchSource' in body) out.matchSource = body.matchSource ? string(body.matchSource, 'matchSource', { min: 1, max: 120 }) : null;
   if ('matchSeverities' in body) out.matchSeverities = severityTokens(body.matchSeverities);
   if ('targetScheduleId' in body) out.targetScheduleId = id(body.targetScheduleId, 'targetScheduleId');
+  if ('notificationChannels' in body) {
+    const channels = body.notificationChannels;
+    if (!Array.isArray(channels) || !channels.length || channels.some((channel) => !['DISCORD', 'SLACK', 'EMAIL'].includes(channel)) || new Set(channels).size !== channels.length) throw domainError('VALIDATION_ERROR', 'notificationChannels must contain unique supported channels.', 400);
+    out.notificationChannels = [...channels];
+  }
+  if ('escalationPolicyId' in body) out.escalationPolicyId = body.escalationPolicyId ? id(body.escalationPolicyId, 'escalationPolicyId') : null;
   return out;
 }
