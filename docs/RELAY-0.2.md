@@ -9,12 +9,9 @@ This document describes Relay 0.2 as a two-milestone release:
 - **M-001 — Alert Routing & On-Call Foundation**;
 - **M-002 — Escalation, Multi-Channel Paging & Durable Delivery**.
 
-Relay 0.2 functional implementation is complete pending Founder integration and
-release qualification. "Complete" here means the implementation and its
-verification are finished in this repository — every acceptance criterion is
-exercised by tests, real-PostgreSQL worker qualification, a production
-deployment check and a real-browser pass. It does not mean the release has been
-integrated by the Founder or tagged.
+Relay 0.2 implementation and release qualification are complete for integration.
+The release remains untagged. The [qualification ledger](qualification/RLY-0.2-M-003.md)
+records the exact gates, environment and any deferred external checks.
 
 ## Release purpose
 
@@ -32,7 +29,7 @@ Current Responder      (rotation, or an active override)
       ↓
 Routing Record         (immutable audit trail, one per alert)
       ↓
-Durable multi-channel page (Discord, Slack, responder email — M-002 target)
+Durable multi-channel page (Discord, Slack, responder email)
       ↓
 No acknowledgement? → Escalation policy (durable, execution-time schedule lookup)
       ↓
@@ -393,11 +390,8 @@ respects `prefers-reduced-motion` and qualifies at 1440×900, 1280×800 and
 
 ### Persistence
 
-- `packages/database/migrations/003_escalation_delivery.sql` was **extended in
-  place** rather than superseded by a `004`: the branch carrying it is unmerged,
-  so no external environment has applied the earlier revision, and an in-place
-  extension keeps the schema readable as one unit. Anything already released
-  (000/001/002) is untouched. The migration adds lease/retry/snapshot columns,
+- `packages/database/migrations/003_escalation_delivery.sql` is the merged M-002
+  forward migration. It adds lease/retry/snapshot columns,
   partial lease indexes, the two idempotency unique indexes and the
   `provider_status_code` CHECK;
 - `001_initial.sql` and `002_alert_routing_oncall.sql` are unchanged, and a

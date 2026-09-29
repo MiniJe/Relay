@@ -17,6 +17,13 @@ Alert routing and on-call (see [`docs/ONCALL.md`](docs/ONCALL.md)):
 - Explicit human escalation from an alert to a canonical incident. Relay never declares an incident automatically.
 - Operator surfaces for Alerts, Teams, On-call and Routing in the existing Quiet Operations style.
 
+Escalation and durable delivery (see [`docs/ESCALATION.md`](docs/ESCALATION.md)):
+
+- Organization-scoped escalation policies with ordered, route-relative steps and immutable execution plans.
+- Durable Discord, Slack Incoming Webhook and SMTP email delivery records with bounded retries and immutable attempt history.
+- PostgreSQL-backed worker leases, concurrent claims and restart recovery.
+- Delivery, escalation and integration settings in the operator UI, including authorized manual retry.
+
 ## What works in 0.1
 
 - Local email/password authentication with durable server-side sessions.
@@ -154,18 +161,11 @@ See:
 - `docs/API.md`
 - `docs/SECURITY.md`
 - `docs/ONCALL.md`
+- `docs/ESCALATION.md`
+- `docs/qualification/RLY-0.2-M-003.md`
 - `docs/RELAY-0.1.md`
 - `docs/RELAY-0.2.md`
 
 ## License
 
 MIT.
-
-### Escalation policy work (M-002 partial)
-
-Relay 0.2 M-002 adds organization-scoped escalation policy configuration,
-rule-level channel/policy references, deterministic schedule snapshots and the
-forward-only migration `003_escalation_delivery.sql`. Durable dispatch/retry
-workers and Slack/SMTP delivery are still under implementation and not yet
-production-qualified; consult [docs/ESCALATION.md](docs/ESCALATION.md) before
-planning a deployment around escalation paging.
