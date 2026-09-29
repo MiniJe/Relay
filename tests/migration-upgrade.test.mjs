@@ -38,7 +38,7 @@ test('migration ordering is derived from filenames, not readdir order', () => {
 });
 
 test('migration runner discovers migration 003 after 001 and 002', async () => {
-  assert.deepEqual(await listMigrationFiles(), ['001_initial.sql','002_alert_routing_oncall.sql','003_escalation_delivery.sql']);
+  assert.deepEqual(await listMigrationFiles(), ['001_initial.sql','002_alert_routing_oncall.sql','003_escalation_delivery.sql','004_incident_command.sql']);
   const source=await readFile(new URL('../packages/database/migrations/003_escalation_delivery.sql',import.meta.url),'utf8');
   const statements=stripTransactionWrapper(splitSqlStatements(source));
   assert.ok(statements.some((sql)=>sql.includes('CREATE TABLE escalation_policies')));
@@ -132,7 +132,7 @@ test('upgrading a populated Relay 0.1 database applies 002→003 and preserves a
 
     // ---- Stage 3: upgrade. Only 002 may be applied.
     const upgrade = await migratePostgres(target);
-    assert.deepEqual(upgrade.applied, ['002_alert_routing_oncall.sql','003_escalation_delivery.sql'], 'only additive 0.2 forward migrations may run against a 0.1 database');
+    assert.deepEqual(upgrade.applied, ['002_alert_routing_oncall.sql','003_escalation_delivery.sql','004_incident_command.sql'], 'only additive 0.2 forward migrations may run against a 0.1 database');
     assert.deepEqual(upgrade.unknown, [], 'no unknown migrations recorded');
 
     // ---- Stage 4: all 0.1 data must be byte-identical.

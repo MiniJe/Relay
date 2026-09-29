@@ -453,3 +453,50 @@ export const openapi = {
     }
   }
 };
+
+// Incident command foundation. The public serializers remain explicit allowlists.
+const incidentBase='/organizations/{organizationId}/incidents/{incidentId}';
+const shortText={type:'string',minLength:1,maxLength:1000};
+const nullableUser={type:['string','null'],description:'Eligible OWNER/ADMIN/RESPONDER member in this organization. Null clears the responsibility.'};
+const nullableDate={type:['string','null'],format:'date-time',description:'RFC 3339 with an explicit offset. Private target; no publication or reminders.'};
+const commandSchema=(required,properties)=>({type:'object',additionalProperties:false,required,properties});
+const commandResponses={
+  '200':{description:'Committed aggregate, revision (decimal string), resulting entity and ETag; exact create replay has replayed=true.'},
+  '201':{description:'Created task or pending handoff; state and timeline committed together.'},
+  '400':{description:'Invalid input or ineligible/cross-tenant assignment.'},
+  '401':{description:'Session required.'},'403':{description:'Organization/action authority required.'},
+  '404':{description:'Record absent in the authorized organization.'},
+  '409':{description:'Illegal transition, pending handoff, or idempotency conflict.'},
+  '412':{description:'REVISION_MISMATCH; preserve the draft, fetch current state and deliberately retry.'},
+  '428':{description:'PRECONDITION_REQUIRED.'}
+};
+const command=(summary,schema,description)=>({summary,description,parameters:[{in:'header',name:'If-Match',required:true,schema:{type:'string'},description:'Exact strong ETag from incident GET: "incident-{id}-r{revision}". New commands require it; revision never grants permission.'}],requestBody:json(schema),responses:commandResponses});
+const uuid={type:'string',format:'uuid',description:'Client-generated stable create ID. Only original creator can replay identical normalized payload; changed payload conflicts.'};
+const taskFields={title:{type:'string',minLength:1,maxLength:200},description:{type:'string',maxLength:5000},assigneeUserId:nullableUser,dueAt:nullableDate};
+openapi.paths[incidentBase+'/tasks']={
+  get:{summary:'Read private incident tasks',description:'VIEWER can read. Stable createdAt/id keyset pagination; limit 1–100 (default 50), cursor scoped to tenant/incident/resource. Envelope includes incidentRevision and page.nextCursor/page.total.',responses:ok('Tasks')},
+  post:command('Create assigned incident work',commandSchema(['id','kind','title'],{id:uuid,kind:{type:'string',enum:['RESPONSE','FOLLOW_UP']},...taskFields}),'OWNER/ADMIN/RESPONDER. Response creation requires active incident; follow-up creation requires resolution. Unassigned work is explicit. No automatic pages.')
+};
+openapi.paths[incidentBase+'/tasks/{taskId}']={get:{summary:'Read a private task',responses:ok('Task')},patch:command('Update task ownership, due date or lifecycle',commandSchema([],{...taskFields,state:{type:'string',enum:['TODO','IN_PROGRESS','BLOCKED','DONE','CANCELLED']},blockedReason:shortText,cancellationReason:shortText}),'OWNER/ADMIN/RESPONDER. BLOCKED and CANCELLED require their reason. Terminal states require explicit reopen. Existing response work remains editable after resolution; assignments never grant permissions.')};
+openapi.paths[incidentBase+'/tasks/{taskId}/reopen']={post:command('Reopen terminal work',commandSchema(['reason'],{reason:shortText}),'OWNER/ADMIN/RESPONDER. DONE/CANCELLED → TODO with audited reason.')};
+openapi.paths[incidentBase+'/handoffs']={get:{summary:'Read private handoff history',description:'Stable createdAt/id pagination; limit 1–100 (default 50), scoped cursor; page.total and incidentRevision included.',responses:ok('Handoffs')},post:command('Propose command handoff',commandSchema(['id','toUserId','note'],{id:uuid,toUserId:{type:'string'},note:{type:'string',minLength:1,maxLength:5000}}),'Current commander or OWNER/ADMIN; active incident; one pending transfer. Current commander remains responsible until named eligible recipient accepts.')};
+for(const action of ['accept','decline','cancel'])openapi.paths[incidentBase+`/handoffs/{handoffId}/${action}`]={post:command(`${action[0].toUpperCase()+action.slice(1)} handoff`,commandSchema(action==='cancel'?['reason']:[],action==='accept'?{}:{reason:shortText}),action==='cancel'?'Proposer, current commander or OWNER/ADMIN; reason required. Commander unchanged.':'Named eligible recipient only, including administrators. Acceptance transfers command and joins responder roster atomically. Decline keeps current commander. Terminal same-action replay with current ETag is a no-op.')};
+openapi.paths[incidentBase+'/commander/reassign']={post:command('Administrative command recovery',commandSchema(['userId','reason'],{userId:{type:'string'},reason:shortText}),'OWNER/ADMIN only; active incident. Explicitly bypasses acceptance, cancels pending transfer and audits the reason.')};
+openapi.paths[incidentBase+'/communication-plan']={patch:command('Set private update responsibility',commandSchema([],{ownerUserId:nullableUser,nextUpdateAt:nullableDate}),'OWNER/ADMIN/RESPONDER. Omission preserves; null clears. Resolved incidents cannot schedule another deadline. Responsibility is not exclusive publication authority.')};
+openapi.paths[incidentBase].get.description='Canonical internal aggregate: commanderDisplayName, revision as decimal string, private tasks/handoffs/linkedAlerts and communication plan. ETag provided. Public APIs exclude operational data.';
+for(const [suffix,method] of [['','patch'],['/responders','post'],['/updates','post'],['/resolve','post'],['/postmortem','put']]){
+  const operation=openapi.paths[incidentBase+suffix][method];
+  operation.parameters=[{in:'header',name:'If-Match',required:false,schema:{type:'string'},description:'Optional for legacy clients; 0.3 UI always sends it. Omission retains transaction-local, supplied-field last-writer-wins semantics.'}];
+  operation.responses={...commandResponses};delete operation.responses['428'];
+}
+openapi.paths[incidentBase].patch.summary='Change severity, lifecycle, summary or affected entities';
+openapi.paths[incidentBase].patch.description='Commander changes/clears return 409 HANDOFF_REQUIRED; unchanged commander is allowed. Use accepted handoff or administrative recovery.';
+openapi.paths[incidentBase+'/updates'].post.requestBody=json({type:'object',required:['message'],properties:{message:{type:'string',minLength:1,maxLength:5000},isPublic:{type:'boolean',default:false},nextPublicUpdateAt:nullableDate,reviewedScope:commandSchema(['componentIds','statusPageIds'],{componentIds:{type:'array',items:{type:'string'}},statusPageIds:{type:'array',items:{type:'string'}}})}});
+openapi.paths[incidentBase+'/updates'].post.description='Only publication path. Optional reviewedScope compares exact affected components/public page IDs inside the transaction; mismatch is 409 PUBLIC_SCOPE_CHANGED. Legacy clients may omit scope. Internal notes cannot change deadlines. Publication without nextPublicUpdateAt preserves the plan.';
+
+openapi.components.schemas.IncidentTask={type:'object',required:['id','organizationId','incidentId','kind','title','state','createdAt','updatedAt'],properties:{id:{type:'string'},organizationId:{type:'string'},incidentId:{type:'string'},kind:{type:'string',enum:['RESPONSE','FOLLOW_UP']},...taskFields,state:{type:'string',enum:['TODO','IN_PROGRESS','BLOCKED','DONE','CANCELLED']},assigneeNameSnapshot:{type:['string','null']},blockedReason:{type:['string','null']},cancellationReason:{type:['string','null']},createdByUserId:{type:'string'},createdByNameSnapshot:{type:'string'},createdAt:{type:'string',format:'date-time'},updatedAt:{type:'string',format:'date-time'},completedAt:nullableDate}};
+openapi.components.schemas.IncidentHandoff={type:'object',required:['id','organizationId','incidentId','toUserId','state','note'],properties:{id:{type:'string'},organizationId:{type:'string'},incidentId:{type:'string'},fromUserId:{type:['string','null']},toUserId:{type:'string'},requestedByUserId:{type:'string'},note:{type:'string'},fromNameSnapshot:{type:['string','null']},toNameSnapshot:{type:'string'},requestedByNameSnapshot:{type:'string'},state:{type:'string',enum:['PENDING','ACCEPTED','DECLINED','CANCELLED']},createdAt:{type:'string',format:'date-time'},decidedAt:nullableDate,decidedByUserId:{type:['string','null']},decidedByNameSnapshot:{type:['string','null']},decisionReason:{type:['string','null']}}};
+openapi.components.schemas.IncidentCommandResult={type:'object',required:['revision','incident'],properties:{revision:{type:'string',pattern:'^[1-9][0-9]*$'},task:ref('IncidentTask'),handoff:ref('IncidentHandoff'),incident:{type:'object',description:'Complete internal incident aggregate; includes tasks, handoffs, linkedAlerts, communicationsOwnerUserId and nextPublicUpdateAt.'}}};
+for(const suffix of ['/tasks','/tasks/{taskId}','/tasks/{taskId}/reopen','/handoffs','/handoffs/{handoffId}/accept','/handoffs/{handoffId}/decline','/handoffs/{handoffId}/cancel','/commander/reassign','/communication-plan']){
+  for(const operation of Object.values(openapi.paths[incidentBase+suffix]))if(operation.requestBody)for(const status of ['200','201'])operation.responses[status]={...operation.responses[status],headers:{ETag:{schema:{type:'string'},description:'Current strong incident ETag.'}},content:{'application/json':{schema:{type:'object',required:['data'],properties:{data:ref('IncidentCommandResult'),replayed:{type:'boolean'}}}}}};
+}

@@ -4,14 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, release/rly-0.2-qualification]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: relay-0.2-release-verification-${{ github.ref }}
+  group: relay-0.3-release-verification-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -135,6 +135,9 @@ jobs:
       - name: Production PostgreSQL-backed E2E
         run: npm run verify:production
 
+      - name: Incident command production E2E
+        run: docker compose exec -T relay node scripts/incident-command-e2e.mjs initial
+
       - name: Restart Relay application container
         run: docker compose restart relay
 
@@ -154,6 +157,9 @@ jobs:
 
       - name: Verify persistence after restart
         run: npm run verify:restart
+
+      - name: Incident command restart persistence
+        run: docker compose exec -T relay node scripts/incident-command-e2e.mjs restart
 
       - name: Final container state
         run: docker compose ps

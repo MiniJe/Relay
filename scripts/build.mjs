@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readdir, stat, access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-const required=['README.md','LICENSE','.env.example','.dockerignore','package-lock.json','docker-compose.yml','Dockerfile','docs/ARCHITECTURE.md','docs/DEVELOPMENT.md','docs/API.md','docs/SECURITY.md','docs/RELAY-0.1.md','docs/RELAY-0.2.md','docs/ONCALL.md','apps/web/public/index.html','apps/web/public/app.js','apps/web/public/styles.css','apps/api/src/server.mjs','packages/database/migrations/001_initial.sql','packages/database/migrations/002_alert_routing_oncall.sql','.github/workflows/release-verification.yml','scripts/production-e2e.mjs','scripts/browser-smoke.mjs','scripts/verify-release-surface.mjs','packages/shared/oncall.mjs','apps/api/src/routing.mjs'];
+const required=['docs/INCIDENT-COMMAND.md','docs/RELAY-0.3.md','packages/shared/incident-command.mjs','packages/database/migrations/004_incident_command.sql','scripts/incident-command-e2e.mjs','README.md','LICENSE','.env.example','.dockerignore','package-lock.json','docker-compose.yml','Dockerfile','docs/ARCHITECTURE.md','docs/DEVELOPMENT.md','docs/API.md','docs/SECURITY.md','docs/RELAY-0.1.md','docs/RELAY-0.2.md','docs/ONCALL.md','apps/web/public/index.html','apps/web/public/app.js','apps/web/public/styles.css','apps/api/src/server.mjs','packages/database/migrations/001_initial.sql','packages/database/migrations/002_alert_routing_oncall.sql','.github/workflows/release-verification.yml','scripts/production-e2e.mjs','scripts/browser-smoke.mjs','scripts/verify-release-surface.mjs','packages/shared/oncall.mjs','apps/api/src/routing.mjs'];
 for(const file of required){try{await access(file)}catch{throw new Error(`Required build artifact missing: ${file}`)}}
 async function walk(dir){const out=[];for(const entry of await readdir(dir)){const full=path.join(dir,entry);const info=await stat(full);if(info.isDirectory())out.push(...await walk(full));else if(/\.(mjs|js)$/.test(full))out.push(full)}return out}
 const files=[...await walk('apps'),...await walk('packages'),...await walk('scripts')];
@@ -49,4 +49,4 @@ await import('../apps/api/src/openapi.mjs');await import('../packages/shared/dom
 const {RELAY_VERSION}=await import('../packages/shared/version.mjs');
 const manifest=JSON.parse(await readFile('package.json','utf8'));
 if(manifest.version!==RELAY_VERSION)throw new Error(`Version mismatch: package.json is ${manifest.version} but RELAY_VERSION is ${RELAY_VERSION}`);
-console.log(`Build verification passed: ${files.length} JavaScript modules parsed; required Relay 0.2 artifacts present.`);
+console.log(`Build verification passed: ${files.length} JavaScript modules parsed; required Relay 0.3 foundation artifacts present.`);

@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
+import { applyIncidentCommand } from '../shared/incident-command.mjs';
 import { domainError } from '../shared/domain.mjs';
 import { validateEscalationSteps } from '../shared/escalation.mjs';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
+const safeUser = (user) => user ? {id:user.id,email:user.email,displayName:user.displayName,createdAt:user.createdAt} : undefined;
 
 export class MemoryStore {
   constructor() {
@@ -18,6 +20,8 @@ export class MemoryStore {
     this.statusPages = [];
     this.statusPageComponents = [];
     this.incidents = [];
+    this.incidentTasks = [];
+    this.incidentHandoffs = [];
     this.incidentServices = [];
     this.incidentComponents = [];
     this.responders = [];
@@ -158,23 +162,29 @@ export class MemoryStore {
   #incidentView(i) {
     return {
       ...clone(i),
+      revision: String(i.revision ?? '1'),
+      commanderDisplayName:this.users.find((u)=>u.id===i.commanderUserId)?.displayName??null,
+      tasks: clone(this.incidentTasks.filter((x)=>x.incidentId===i.id)),
+      handoffs: clone(this.incidentHandoffs.filter((x)=>x.incidentId===i.id)),
+      linkedAlerts: clone(this.alerts.filter((a)=>a.organizationId===i.organizationId && this.alertRoutings.some((r)=>r.alertId===a.id && r.incidentId===i.id))),
       affectedServiceIds: this.incidentServices.filter((x) => x.incidentId === i.id).map((x) => x.serviceId),
       affectedComponentIds: this.incidentComponents.filter((x) => x.incidentId === i.id).map((x) => x.componentId),
-      responders: this.responders.filter((x) => x.incidentId === i.id).map((x) => ({ ...clone(x), user: clone(this.users.find((u)=>u.id===x.userId)) })),
-      timeline: this.timeline.filter((x) => x.incidentId === i.id).sort((a,b)=>new Date(a.occurredAt)-new Date(b.occurredAt)).map((x)=>({ ...clone(x), actor: clone(this.users.find((u)=>u.id===x.actorUserId)) })),
-      updates: this.updates.filter((x) => x.incidentId === i.id).sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt)).map((x)=>({ ...clone(x), actor: clone(this.users.find((u)=>u.id===x.actorUserId)) })),
+      responders: this.responders.filter((x) => x.incidentId === i.id).map((x) => ({ ...clone(x), user: safeUser(this.users.find((u)=>u.id===x.userId)) })),
+      timeline: this.timeline.filter((x) => x.incidentId === i.id).sort((a,b)=>new Date(a.occurredAt)-new Date(b.occurredAt)).map((x)=>({ ...clone(x), actor: safeUser(this.users.find((u)=>u.id===x.actorUserId)) })),
+      updates: this.updates.filter((x) => x.incidentId === i.id).sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt)).map((x)=>({ ...clone(x), actor: safeUser(this.users.find((u)=>u.id===x.actorUserId)) })),
       postmortem: clone(this.postmortems.find((x) => x.incidentId === i.id))
     };
   }
 
   async createIncident(organizationId, record, affectedServiceIds, affectedComponentIds, event) {
+    for(const userId of [record.creatorUserId,record.commanderUserId].filter(Boolean))if(!this.memberships.some((m)=>m.organizationId===organizationId&&m.userId===userId&&['OWNER','ADMIN','RESPONDER'].includes(m.role)))throw domainError('INVALID_REFERENCE','Incident ownership requires an eligible organization member.',400);
     const at = now();
-    const incident = { id: uid(), organizationId, ...record, status: 'INVESTIGATING', startedAt: at, acknowledgedAt: null, resolvedAt: null, createdAt: at, updatedAt: at };
+    const incident = { id: uid(), organizationId, ...record, revision: '1', communicationsOwnerUserId: null, nextPublicUpdateAt: null, status: 'INVESTIGATING', startedAt: at, acknowledgedAt: null, resolvedAt: null, createdAt: at, updatedAt: at };
     this.incidents.push(incident);
     this.incidentServices.push(...affectedServiceIds.map((serviceId)=>({incidentId:incident.id,serviceId})));
     this.incidentComponents.push(...affectedComponentIds.map((componentId)=>({incidentId:incident.id,componentId})));
     this.responders.push({ incidentId: incident.id, userId: record.creatorUserId, joinedAt: at });
-    this.timeline.push({ id: uid(), incidentId: incident.id, occurredAt: at, ...event });
+    this.timeline.push({ id: uid(), organizationId, incidentId: incident.id, incidentRevision:'1',eventIndex:0,schemaVersion:1,actorDisplayNameSnapshot:this.users.find((u)=>u.id===event.actorUserId)?.displayName??null,occurredAt: at, ...event });
     return this.getIncident(organizationId, incident.id);
   }
   async listIncidents(organizationId) {
@@ -184,48 +194,40 @@ export class MemoryStore {
     const incident = this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
     return incident ? this.#incidentView(incident) : undefined;
   }
-  async updateIncident(organizationId, incidentId, patch, { affectedServiceIds, affectedComponentIds, events = [] } = {}) {
-    const incident = this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
-    if (!incident) return undefined;
-    Object.assign(incident, patch, { updatedAt: now() });
-    if (patch.status === 'RESOLVED' && !incident.resolvedAt) incident.resolvedAt = now();
-    if (affectedServiceIds) {
-      this.incidentServices = this.incidentServices.filter((x)=>x.incidentId!==incidentId);
-      this.incidentServices.push(...affectedServiceIds.map((serviceId)=>({incidentId,serviceId})));
+  incidentCommand(organizationId,incidentId,command) {
+    const row=this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
+    if(!row)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);
+    if(['taskCreate','handoffCreate'].includes(command.action)){const rows=command.action==='taskCreate'?this.incidentTasks:this.incidentHandoffs;if(rows.some((x)=>x.id===command.input.id&&x.incidentId!==incidentId))throw domainError('IDEMPOTENCY_CONFLICT','This ID is unavailable.',409);}
+    if(command.action==='patch'){for(const [key,records] of [['affectedServiceIds',this.services],['affectedComponentIds',this.components]])for(const target of command.input[key]??[])if(!records.some((x)=>x.organizationId===organizationId&&x.id===target))throw domainError('INVALID_REFERENCE','Affected systems must belong to this organization.',400);}
+    const snapshot=this.#incidentView(row);
+    const members=this.memberships.filter((m)=>m.organizationId===organizationId).map((m)=>({...m,displayName:this.users.find((u)=>u.id===m.userId)?.displayName}));
+    const pages=this.statusPages.filter((p)=>p.organizationId===organizationId).map((p)=>({...p,componentIds:this.statusPageComponents.filter((x)=>x.statusPageId===p.id).map((x)=>x.componentId)}));
+    const result=applyIncidentCommand(snapshot,command,members,pages);
+    if(result.changed){
+      const {tasks,handoffs,responders,updates,postmortem,timeline,affectedServiceIds,affectedComponentIds,linkedAlerts,commanderDisplayName,...fields}=result.incident;
+      Object.assign(row,fields);
+      const replace=(key,rows)=>{this[key]=this[key].filter((x)=>x.incidentId!==incidentId).concat(rows);};
+      replace('incidentTasks',tasks);replace('incidentHandoffs',handoffs);replace('responders',responders);
+      replace('updates',updates);replace('timeline',timeline);
+      replace('incidentServices',affectedServiceIds.map((serviceId)=>({incidentId,serviceId})));
+      replace('incidentComponents',affectedComponentIds.map((componentId)=>({incidentId,componentId})));
+      if(postmortem)replace('postmortems',[postmortem]);
     }
-    if (affectedComponentIds) {
-      this.incidentComponents = this.incidentComponents.filter((x)=>x.incidentId!==incidentId);
-      this.incidentComponents.push(...affectedComponentIds.map((componentId)=>({incidentId,componentId})));
-    }
-    for (const event of events) this.timeline.push({ id: uid(), incidentId, occurredAt: now(), ...event });
-    return this.getIncident(organizationId, incidentId);
+    return {...result,incident:this.#incidentView(row)};
   }
-  async addIncidentUpdate(organizationId, incidentId, { actorUserId, message, isPublic }, event) {
-    const incident = this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
-    if (!incident) return undefined;
-    const update = { id: uid(), incidentId, actorUserId, message, isPublic, createdAt: now() };
-    this.updates.push(update);
-    this.timeline.push({ id: uid(), incidentId, occurredAt: now(), ...event });
-    incident.updatedAt = now();
-    return { update: clone(update), incident: await this.getIncident(organizationId, incidentId) };
+  async updateIncident(organizationId,incidentId,patch,options={}) {
+    const actorUserId=options.actorUserId??options.events?.[0]?.actorUserId;
+    return this.incidentCommand(organizationId,incidentId,{action:'patch',input:patch,actorUserId,expectedRevision:options.expectedRevision}).incident;
   }
-  async addResponder(organizationId, incidentId, userId, actorUserId) {
-    const incident = this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
-    if (!incident) return undefined;
-    if (!this.responders.some((x)=>x.incidentId===incidentId && x.userId===userId)) {
-      this.responders.push({ incidentId, userId, joinedAt: now() });
-      this.timeline.push({ id: uid(), incidentId, actorUserId, eventType: 'RESPONDER_JOINED', message: 'Responder joined the incident.', metadata: { userId }, occurredAt: now() });
-    }
-    return this.getIncident(organizationId, incidentId);
+  async addIncidentUpdate(organizationId,incidentId,input,event,options={}) {
+    const r=this.incidentCommand(organizationId,incidentId,{action:'update',input,actorUserId:input.actorUserId,expectedRevision:options.expectedRevision});
+    return {update:r.entity,incident:r.incident};
   }
-  async upsertPostmortem(organizationId, incidentId, input, userId) {
-    const incident = this.incidents.find((i)=>i.organizationId===organizationId && i.id===incidentId);
-    if (!incident) return undefined;
-    const existing = this.postmortems.find((p)=>p.incidentId===incidentId);
-    if (existing) Object.assign(existing, input, { updatedAt: now() });
-    else this.postmortems.push({ id: uid(), incidentId, ...input, createdByUserId:userId, createdAt:now(), updatedAt:now() });
-    this.timeline.push({ id: uid(), incidentId, actorUserId:userId, eventType: existing ? 'POSTMORTEM_UPDATED' : 'POSTMORTEM_CREATED', message: existing ? 'Postmortem updated.' : 'Postmortem created.', metadata:{}, occurredAt:now() });
-    return this.getIncident(organizationId, incidentId);
+  async addResponder(organizationId,incidentId,userId,actorUserId,options={}) {
+    return this.incidentCommand(organizationId,incidentId,{action:'responder',input:{userId},actorUserId,expectedRevision:options.expectedRevision}).incident;
+  }
+  async upsertPostmortem(organizationId,incidentId,input,actorUserId,options={}) {
+    return this.incidentCommand(organizationId,incidentId,{action:'postmortem',input,actorUserId,expectedRevision:options.expectedRevision}).incident;
   }
 
   // ---------------------------------------------------------------------

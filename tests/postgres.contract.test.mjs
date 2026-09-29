@@ -70,6 +70,8 @@ test('PostgreSQL migration/store contract', {skip:!databaseUrl?'DATABASE_URL not
     assert.equal(typeof incident.timeline[0].metadata,'object');
     const page=await store.createStatusPage(org.id,{name:'Public Status',slug:`pg-status-${marker}`,isPublic:true,branding:{accent:'#3b82f6',logoUrl:''},componentIds:[component.id]});
     assert.deepEqual(page.branding,{accent:'#3b82f6',logoUrl:''});
+    await assert.rejects(store.upsertPostmortem(org.id,incident.id,{title:'Review'},user.id),{code:'INCIDENT_NOT_RESOLVED'});
+    await store.updateIncident(org.id,incident.id,{status:'RESOLVED'},{actorUserId:user.id});
     const withPostmortem=await store.upsertPostmortem(org.id,incident.id,{title:'Review',summary:'',impact:'',rootCause:'',resolution:'',followUpActions:['Add a regression test']},user.id);
     assert.deepEqual(withPostmortem.postmortem.followUpActions,['Add a regression test']);
   } finally {await store.close()}

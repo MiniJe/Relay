@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { applyIncidentCommand, OPERATIONAL_ROLES } from '../shared/incident-command.mjs';
 import { readdir, readFile } from 'node:fs/promises';
 import { domainError } from '../shared/domain.mjs';
 import { validateEscalationSteps } from '../shared/escalation.mjs';
@@ -160,6 +161,7 @@ export class PostgresStore {
 
   async createStatusPage(organizationId,input){
     try{return await this.sql.begin(async(tx)=>{
+      await tx.unsafe('SELECT id FROM organizations WHERE id=$1 FOR UPDATE',[organizationId]);
       const page=await this.#one(`INSERT INTO status_pages(id,organization_id,name,slug,is_public,branding) VALUES($1,$2,$3,$4,$5,$6::text::jsonb) RETURNING *`,[uid(),organizationId,input.name,input.slug,input.isPublic,JSON.stringify(input.branding)],tx);
       for(let i=0;i<input.componentIds.length;i++) await tx.unsafe(`INSERT INTO status_page_components(status_page_id,component_id,sort_order) SELECT $1,c.id,$3 FROM components c WHERE c.id=$2 AND c.organization_id=$4`,[page.id,input.componentIds[i],i,organizationId]);
       return {...page,componentIds:input.componentIds};
@@ -177,68 +179,93 @@ export class PostgresStore {
       sql.unsafe(`SELECT service_id FROM incident_services WHERE incident_id=$1`,[incidentId]),
       sql.unsafe(`SELECT component_id FROM incident_components WHERE incident_id=$1`,[incidentId]),
       sql.unsafe(`SELECT r.*,u.email,u.display_name,u.created_at AS user_created_at FROM incident_responders r JOIN users u ON u.id=r.user_id WHERE r.incident_id=$1 ORDER BY r.joined_at`,[incidentId]),
-      sql.unsafe(`SELECT e.*,u.email,u.display_name FROM incident_timeline_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.incident_id=$1 ORDER BY e.occurred_at`,[incidentId]),
+      sql.unsafe(`SELECT e.*,u.email,u.display_name FROM incident_timeline_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.incident_id=$1 ORDER BY e.incident_revision,e.event_index`,[incidentId]),
       sql.unsafe(`SELECT x.*,u.email,u.display_name FROM incident_updates x JOIN users u ON u.id=x.actor_user_id WHERE x.incident_id=$1 ORDER BY x.created_at`,[incidentId]),
       sql.unsafe(`SELECT * FROM postmortems WHERE incident_id=$1`,[incidentId])
     ]);
     return {
-      ...incident,
+      ...incident,revision:String(incident.revision),
+      commanderDisplayName:(await sql.unsafe('SELECT display_name FROM users WHERE id=$1',[incident.commanderUserId]))[0]?.display_name??null,
+      tasks:map(await sql.unsafe('SELECT * FROM incident_tasks WHERE organization_id=$1 AND incident_id=$2 ORDER BY created_at,id',[organizationId,incidentId])),
+      handoffs:map(await sql.unsafe('SELECT * FROM incident_handoffs WHERE organization_id=$1 AND incident_id=$2 ORDER BY created_at,id',[organizationId,incidentId])),
+      linkedAlerts:map(await sql.unsafe('SELECT a.* FROM alerts a JOIN alert_routings r ON r.alert_id=a.id WHERE r.organization_id=$1 AND r.incident_id=$2 ORDER BY a.received_at,a.id',[organizationId,incidentId])),
       affectedServiceIds:serviceLinks.map((r)=>r.service_id),affectedComponentIds:componentLinks.map((r)=>r.component_id),
       responders:responderRows.map((r)=>({incidentId:r.incident_id,userId:r.user_id,joinedAt:r.joined_at.toISOString(),user:{id:r.user_id,email:r.email,displayName:r.display_name,createdAt:r.user_created_at.toISOString()}})),
-      timeline:timelineRows.map((r)=>({id:r.id,incidentId:r.incident_id,actorUserId:r.actor_user_id,eventType:r.event_type,message:r.message,metadata:r.metadata,occurredAt:r.occurred_at.toISOString(),actor:r.actor_user_id?{id:r.actor_user_id,email:r.email,displayName:r.display_name}:undefined})),
+      timeline:timelineRows.map((r)=>({organizationId:r.organization_id,incidentRevision:String(r.incident_revision),eventIndex:r.event_index,actorDisplayNameSnapshot:r.actor_display_name_snapshot,schemaVersion:r.schema_version,id:r.id,incidentId:r.incident_id,actorUserId:r.actor_user_id,eventType:r.event_type,message:r.message,metadata:r.metadata,occurredAt:r.occurred_at.toISOString(),actor:r.actor_user_id?{id:r.actor_user_id,email:r.email,displayName:r.display_name}:undefined})),
       updates:updateRows.map((r)=>({id:r.id,incidentId:r.incident_id,actorUserId:r.actor_user_id,message:r.message,isPublic:r.is_public,createdAt:r.created_at.toISOString(),actor:{id:r.actor_user_id,email:r.email,displayName:r.display_name}})),
       postmortem:camel(postmortemRows[0])
     };
   }
   async createIncident(organizationId,record,affectedServiceIds,affectedComponentIds,event){
     try{return await this.sql.begin(async(tx)=>{
+      const members=await tx.unsafe('SELECT * FROM organization_memberships WHERE organization_id=$1 ORDER BY user_id FOR UPDATE',[organizationId]);
+      for(const userId of [record.creatorUserId,record.commanderUserId].filter(Boolean))if(!members.some((m)=>m.user_id===userId&&OPERATIONAL_ROLES.includes(m.role)))throw domainError('INVALID_REFERENCE','Incident ownership requires an eligible organization member.',400);
       const incidentId=uid();
       await tx.unsafe(`INSERT INTO incidents(id,organization_id,title,summary,severity,status,creator_user_id,commander_user_id) VALUES($1,$2,$3,$4,$5,'INVESTIGATING',$6,$7)`,[incidentId,organizationId,record.title,record.summary,record.severity,record.creatorUserId,record.commanderUserId??null]);
       for(const serviceId of affectedServiceIds) await tx.unsafe(`INSERT INTO incident_services(incident_id,service_id) SELECT $1,s.id FROM services s WHERE s.id=$2 AND s.organization_id=$3`,[incidentId,serviceId,organizationId]);
       for(const componentId of affectedComponentIds) await tx.unsafe(`INSERT INTO incident_components(incident_id,component_id) SELECT $1,c.id FROM components c WHERE c.id=$2 AND c.organization_id=$3`,[incidentId,componentId,organizationId]);
       await tx.unsafe(`INSERT INTO incident_responders(incident_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,[incidentId,record.creatorUserId]);
-      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
+      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata,organization_id,incident_revision,event_index,schema_version,actor_display_name_snapshot) VALUES($1,$2,$3,$4,$5,$6::text::jsonb,$7,1,0,1,(SELECT display_name FROM users WHERE id=$3))`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{}),organizationId]);
       return this.#incidentView(organizationId,incidentId,tx);
     })}catch(error){throw normalizeDbError(error)}
   }
-  async listIncidents(organizationId){const rows=await this.sql.unsafe(`SELECT id FROM incidents WHERE organization_id=$1 ORDER BY started_at DESC`,[organizationId]);return Promise.all(rows.map((r)=>this.#incidentView(organizationId,r.id)));}
-  async getIncident(organizationId,incidentId){return this.#incidentView(organizationId,incidentId);}
-  async updateIncident(organizationId,incidentId,patch,{affectedServiceIds,affectedComponentIds,events=[]}={}){
-    const current=await this.getIncident(organizationId,incidentId);if(!current)return undefined;
-    return this.sql.begin(async(tx)=>{
-      await tx.unsafe(`UPDATE incidents SET summary=$3,severity=$4,status=$5,commander_user_id=$6,resolved_at=CASE WHEN $5='RESOLVED' THEN COALESCE(resolved_at,now()) ELSE resolved_at END,updated_at=now() WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId,patch.summary??current.summary,patch.severity??current.severity,patch.status??current.status,patch.commanderUserId===undefined?current.commanderUserId:patch.commanderUserId]);
-      if(affectedServiceIds){await tx.unsafe(`DELETE FROM incident_services WHERE incident_id=$1`,[incidentId]);for(const serviceId of affectedServiceIds)await tx.unsafe(`INSERT INTO incident_services(incident_id,service_id) SELECT $1,s.id FROM services s WHERE s.id=$2 AND s.organization_id=$3`,[incidentId,serviceId,organizationId]);}
-      if(affectedComponentIds){await tx.unsafe(`DELETE FROM incident_components WHERE incident_id=$1`,[incidentId]);for(const componentId of affectedComponentIds)await tx.unsafe(`INSERT INTO incident_components(incident_id,component_id) SELECT $1,c.id FROM components c WHERE c.id=$2 AND c.organization_id=$3`,[incidentId,componentId,organizationId]);}
-      for(const event of events) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
-      return this.#incidentView(organizationId,incidentId,tx);
-    });
+  async listIncidents(organizationId){return this.sql.begin('isolation level repeatable read',async(tx)=>{const rows=await tx.unsafe(`SELECT id FROM incidents WHERE organization_id=$1 ORDER BY started_at DESC`,[organizationId]);return Promise.all(rows.map((r)=>this.#incidentView(organizationId,r.id,tx)));});}
+  async getIncident(organizationId,incidentId){return this.sql.begin('isolation level repeatable read',tx=>this.#incidentView(organizationId,incidentId,tx));}
+  async incidentCommand(organizationId,incidentId,command) {
+    try{return await this.sql.begin(async(tx)=>{
+      // Shared lock order: memberships, organization scope, incident. Conservative
+      // organization serialization keeps review audiences stable for this slice.
+      const members=map(await tx.unsafe('SELECT m.*,u.display_name FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 ORDER BY m.user_id FOR UPDATE OF m',[organizationId]));
+      await tx.unsafe('SELECT id FROM organizations WHERE id=$1 FOR UPDATE',[organizationId]);
+      const locked=await tx.unsafe('SELECT id FROM incidents WHERE organization_id=$1 AND id=$2 FOR UPDATE',[organizationId,incidentId]);
+      if(!locked.length)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);
+      const before=await this.#incidentView(organizationId,incidentId,tx);
+      const pages=map(await tx.unsafe('SELECT * FROM status_pages WHERE organization_id=$1',[organizationId]));
+      for(const page of pages)page.componentIds=(await tx.unsafe('SELECT component_id FROM status_page_components WHERE status_page_id=$1',[page.id])).map((r)=>r.component_id);
+      const result=applyIncidentCommand(before,command,members,pages);
+      if(!result.changed)return result;
+      const i=result.incident;
+      await tx.unsafe(`UPDATE incidents SET summary=$3,severity=$4,status=$5,commander_user_id=$6,communications_owner_user_id=$7,next_public_update_at=$8,resolved_at=$9,revision=$10,updated_at=$11 WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId,i.summary,i.severity,i.status,i.commanderUserId,i.communicationsOwnerUserId,i.nextPublicUpdateAt,i.resolvedAt,i.revision,i.updatedAt]);
+      const save=async(table,columns,row)=>{
+        const snake=(k)=>k.replace(/[A-Z]/g,(c)=>'_'+c.toLowerCase());
+        const names=columns.map(snake);
+        const values=columns.map((k)=>row[k]??null);
+        const tenantGuard=['incident_tasks','incident_handoffs'].includes(table)?` WHERE ${table}.organization_id=EXCLUDED.organization_id AND ${table}.incident_id=EXCLUDED.incident_id`:'';
+        const saved=await tx.unsafe(`INSERT INTO ${table} (${names.join(',')}) VALUES (${values.map((_,n)=>'$'+(n+1)).join(',')}) ON CONFLICT (id) DO UPDATE SET ${names.filter((k)=>k!=='id').map((k)=>`${k}=EXCLUDED.${k}`).join(',')}${tenantGuard} RETURNING id`,values);
+        if(!saved.length)throw domainError('IDEMPOTENCY_CONFLICT','This ID is unavailable.',409);
+      };
+      for(const task of i.tasks)if(JSON.stringify(task)!==JSON.stringify(before.tasks.find((t)=>t.id===task.id)))await save('incident_tasks',['id','organizationId','incidentId','kind','title','description','state','assigneeUserId','assigneeNameSnapshot','dueAt','blockedReason','cancellationReason','createdByUserId','createdByNameSnapshot','createdAt','updatedAt','completedAt','creationPayloadHash'],task);
+      for(const h of i.handoffs)if(JSON.stringify(h)!==JSON.stringify(before.handoffs.find((x)=>x.id===h.id)))await save('incident_handoffs',['id','organizationId','incidentId','fromUserId','toUserId','requestedByUserId','fromNameSnapshot','toNameSnapshot','requestedByNameSnapshot','note','state','createdAt','decidedAt','decidedByUserId','decidedByNameSnapshot','decisionReason','creationPayloadHash'],h);
+      for(const [key,table,column] of [['affectedServiceIds','incident_services','service_id'],['affectedComponentIds','incident_components','component_id']])if(JSON.stringify(i[key])!==JSON.stringify(before[key])){
+        await tx.unsafe(`DELETE FROM ${table} WHERE incident_id=$1`,[incidentId]);
+        const referenceTable=key==='affectedServiceIds'?'services':'components';
+        for(const target of i[key]){
+          const exists=await tx.unsafe(`SELECT id FROM ${referenceTable} WHERE organization_id=$1 AND id=$2`,[organizationId,target]);
+          if(!exists.length)throw domainError('INVALID_REFERENCE','Affected systems must belong to this organization.',400);
+          await tx.unsafe(`INSERT INTO ${table}(incident_id,${column}) VALUES($1,$2)`,[incidentId,target]);
+        }
+      }
+      for(const r of i.responders)if(!before.responders.some((x)=>x.userId===r.userId))await tx.unsafe('INSERT INTO incident_responders(incident_id,user_id,joined_at) VALUES($1,$2,$3)',[incidentId,r.userId,r.joinedAt]);
+      for(const u of i.updates)if(!before.updates.some((x)=>x.id===u.id))await save('incident_updates',['id','incidentId','actorUserId','message','isPublic','createdAt'],u);
+      if(i.postmortem&&JSON.stringify(i.postmortem)!==JSON.stringify(before.postmortem)){
+        const p=i.postmortem;
+        await tx.unsafe(`INSERT INTO postmortems(id,incident_id,title,summary,impact,root_cause,resolution,follow_up_actions,created_by_user_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9,$10,$11) ON CONFLICT (incident_id) DO UPDATE SET title=EXCLUDED.title,summary=EXCLUDED.summary,impact=EXCLUDED.impact,root_cause=EXCLUDED.root_cause,resolution=EXCLUDED.resolution,follow_up_actions=EXCLUDED.follow_up_actions,updated_at=EXCLUDED.updated_at`,[p.id,incidentId,p.title,p.summary,p.impact,p.rootCause,p.resolution,JSON.stringify(p.followUpActions),p.createdByUserId,p.createdAt,p.updatedAt]);
+      }
+      for(const e of result.events)await tx.unsafe(`INSERT INTO incident_timeline_events(id,organization_id,incident_id,actor_user_id,actor_display_name_snapshot,event_type,message,metadata,occurred_at,incident_revision,event_index,schema_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9,$10,$11,$12)`,[e.id,organizationId,incidentId,e.actorUserId,e.actorDisplayNameSnapshot,e.eventType,e.message,JSON.stringify(e.metadata),e.occurredAt,e.incidentRevision,e.eventIndex,e.schemaVersion]);
+      return {...result,incident:await this.#incidentView(organizationId,incidentId,tx)};
+    })}catch(error){throw normalizeDbError(error)}
   }
-  async addIncidentUpdate(organizationId,incidentId,{actorUserId,message,isPublic},event){
-    const existing=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!existing)return undefined;
-    return this.sql.begin(async(tx)=>{
-      const update=await this.#one(`INSERT INTO incident_updates(id,incident_id,actor_user_id,message,is_public) VALUES($1,$2,$3,$4,$5) RETURNING *`,[uid(),incidentId,actorUserId,message,isPublic],tx);
-      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,$6::text::jsonb)`,[uid(),incidentId,event.actorUserId,event.eventType,event.message??null,JSON.stringify(event.metadata??{})]);
-      await tx.unsafe(`UPDATE incidents SET updated_at=now() WHERE id=$1`,[incidentId]);
-      return {update,incident:await this.#incidentView(organizationId,incidentId,tx)};
-    });
+  async updateIncident(organizationId,incidentId,patch,options={}) {
+    return (await this.incidentCommand(organizationId,incidentId,{action:'patch',input:patch,actorUserId:options.actorUserId??options.events?.[0]?.actorUserId,expectedRevision:options.expectedRevision})).incident;
   }
-  async addResponder(organizationId,incidentId,userId,actorUserId){
-    const existing=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!existing)return undefined;
-    return this.sql.begin(async(tx)=>{
-      const inserted=await tx.unsafe(`INSERT INTO incident_responders(incident_id,user_id) SELECT $1,m.user_id FROM organization_memberships m WHERE m.organization_id=$2 AND m.user_id=$3 ON CONFLICT DO NOTHING RETURNING user_id`,[incidentId,organizationId,userId]);
-      if(inserted.length) await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,'RESPONDER_JOINED','Responder joined the incident.',$4::text::jsonb)`,[uid(),incidentId,actorUserId,JSON.stringify({userId})]);
-      return this.#incidentView(organizationId,incidentId,tx);
-    });
+  async addIncidentUpdate(organizationId,incidentId,input,event,options={}) {
+    const r=await this.incidentCommand(organizationId,incidentId,{action:'update',input,actorUserId:input.actorUserId,expectedRevision:options.expectedRevision});return {update:r.entity,incident:r.incident};
   }
-  async upsertPostmortem(organizationId,incidentId,input,userId){
-    const incident=await this.#one(`SELECT id FROM incidents WHERE organization_id=$1 AND id=$2`,[organizationId,incidentId]);if(!incident)return undefined;
-    return this.sql.begin(async(tx)=>{
-      const existing=await this.#one(`SELECT id FROM postmortems WHERE incident_id=$1`,[incidentId],tx);
-      if(existing) await tx.unsafe(`UPDATE postmortems SET title=$2,summary=$3,impact=$4,root_cause=$5,resolution=$6,follow_up_actions=$7::text::jsonb,updated_at=now() WHERE incident_id=$1`,[incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions)]);
-      else await tx.unsafe(`INSERT INTO postmortems(id,incident_id,title,summary,impact,root_cause,resolution,follow_up_actions,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::jsonb,$9)`,[uid(),incidentId,input.title,input.summary,input.impact,input.rootCause,input.resolution,JSON.stringify(input.followUpActions),userId]);
-      await tx.unsafe(`INSERT INTO incident_timeline_events(id,incident_id,actor_user_id,event_type,message,metadata) VALUES($1,$2,$3,$4,$5,'{}'::jsonb)`,[uid(),incidentId,userId,existing?'POSTMORTEM_UPDATED':'POSTMORTEM_CREATED',existing?'Postmortem updated.':'Postmortem created.']);
-      return this.#incidentView(organizationId,incidentId,tx);
-    });
+  async addResponder(organizationId,incidentId,userId,actorUserId,options={}) {
+    return (await this.incidentCommand(organizationId,incidentId,{action:'responder',input:{userId},actorUserId,expectedRevision:options.expectedRevision})).incident;
+  }
+  async upsertPostmortem(organizationId,incidentId,input,actorUserId,options={}) {
+    return (await this.incidentCommand(organizationId,incidentId,{action:'postmortem',input,actorUserId,expectedRevision:options.expectedRevision})).incident;
   }
 
   async getPublicStatusPage(slug){
