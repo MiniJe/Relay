@@ -33,6 +33,7 @@ for(const backend of ['memory','postgres'])test(`${backend}: incident command AP
   assert.equal((await request(owner,path+'/tasks','POST',{...taskBody,bogus:'invalid'},tag)).res.status,400);
   const taskResult=await request(owner,path+'/tasks','POST',taskBody,tag);assert.equal(taskResult.res.status,201);const taskId=taskResult.json.data.task.id;
   assert.equal((await request(owner,path+'/tasks','POST',taskBody,tag)).json.replayed,true,'lost-response replay allowed with old but valid ETag');
+  assert.equal((await request(owner,path+'/tasks','POST',{description:'',...taskBody},tag)).json.replayed,true,'normalized defaults and request key order must not change create identity');
   assert.equal((await request(owner,path+'/tasks','POST',{...taskBody,title:'changed'},tag)).res.status,409);
   assert.equal((await request(members.ADMIN,path+'/tasks','POST',taskBody,tag)).res.status,403,'another creator cannot replay');
   tag=await read();

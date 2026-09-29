@@ -8,7 +8,9 @@ export const incidentEtag = (incident) => `"incident-${incident.id}-r${incident.
 const fail = (code,message,status=409) => { throw domainError(code,message,status); };
 const equal = (a,b) => JSON.stringify(a)===JSON.stringify(b);
 const terminal = (state) => ['DONE','CANCELLED'].includes(state);
-const hash = (input) => crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+// Create inputs are flat typed records. Canonical key order makes an omitted
+// default and its explicit normalized value the same lost-response replay.
+const hash = (input) => crypto.createHash('sha256').update(JSON.stringify(input,Object.keys(input).sort())).digest('hex');
 
 export function incidentPrecondition(value,incidentId,required=false) {
   if(value===undefined){if(required)fail('PRECONDITION_REQUIRED','Refresh the incident and send its If-Match ETag.',428);return null;}

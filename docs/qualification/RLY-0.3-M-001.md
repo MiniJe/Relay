@@ -9,8 +9,11 @@ Dedicated [PR #7](https://github.com/MiniJe/Relay/pull/7) targets
 [relay-ci](https://github.com/MiniJe/Relay/actions/runs/36633688445) and the full
 [release-verification](https://github.com/MiniJe/Relay/actions/runs/36633688519)
 on Linux, including Docker, browser, command E2E and restart persistence.
-The final display-separator cleanup and refreshed captures are checked again
-by the same PR workflows; current results are available on the PR checks.
+The responsive correction at `61450ea` also passed
+[relay-ci](https://github.com/MiniJe/Relay/actions/runs/36634584021) and
+[release-verification](https://github.com/MiniJe/Relay/actions/runs/36634584011).
+The final canonical-create replay correction is checked by the same PR
+workflows; current final-branch results are available on the PR checks.
 
 ## Baseline and scope
 
@@ -81,6 +84,9 @@ branch; existing checks remain and command E2E/restart checks are added.
 - MemoryStore nested incident users included password hashes; serializers now
   expose only safe user fields.
 - Cross-incident create-ID reuse is rejected without overwriting another record.
+- Create replay hashing uses canonical key order: an omitted default and the
+  same explicit normalized value do not create an idempotency conflict. The
+  parity qualification asserts this on both stores.
 - Final-commit CI exposed a 3px mobile incident-header overflow with a longer
   title. Header columns now constrain long titles and actions wrap below the title on narrow screens; browser
   qualification also stress-checks valid 200-character unbroken titles.
