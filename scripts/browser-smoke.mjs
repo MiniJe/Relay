@@ -862,6 +862,8 @@ async function main() {
           dashOverflow[`${viewport.label} ${route}`] = delta;
           check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px past a ${await page.evaluate('document.documentElement.clientWidth')}px viewport; offenders: ${(measured.offenders ?? []).join(' , ') || 'none identified'}`);
         }
+        const longTitleOverflow=await page.evaluate(`(() => {const title=document.querySelector('.incident-command-head h1');const original=title.textContent;title.textContent='W'.repeat(200);const delta=document.documentElement.scrollWidth-document.documentElement.clientWidth;title.textContent=original;return delta;})()`);
+        check(`maximum-length unbroken incident title holds at ${viewport.label}`,longTitleOverflow<=1,`+${longTitleOverflow}px overflow`);
         check(`incident command actions visible at ${viewport.label}`,await page.evaluate(`!!document.querySelector('#add-command-task') && !!document.querySelector('#recover-command') && !!document.querySelector('#current-commander')`));
         const file = await page.screenshot(`incident-command-${viewport.label}`);
         if (file) console.log(`      screenshot: ${file}`);

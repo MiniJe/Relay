@@ -34,7 +34,7 @@ the intentional legacy commander-PATCH compatibility exception.
 | Check | Evidence/result |
 | --- | --- |
 | Clean lockfile install | `npm ci`; Node 24.21.0 on Windows; no dependency vulnerabilities reported |
-| Build | All 33 application/package/script modules parse; 66 CDP evaluation payloads parse; required artifacts and version agree |
+| Build | All 33 application/package/script modules parse; 67 CDP evaluation payloads parse; required artifacts and version agree |
 | Automated suite | `DATABASE_URL=... npm run verify`: 87 tests, 87 pass, 0 fail, 0 skip; PostgreSQL 16 enabled |
 | Secret scan | PASS; fixture credentials/state remain in ignored local artifacts or temporary container storage |
 | Store parity | Same HTTP command scenario against MemoryStore and PostgreSQL |
@@ -81,6 +81,9 @@ branch; existing checks remain and command E2E/restart checks are added.
 - MemoryStore nested incident users included password hashes; serializers now
   expose only safe user fields.
 - Cross-incident create-ID reuse is rejected without overwriting another record.
+- Final-commit CI exposed a 3px mobile incident-header overflow with a longer
+  title. Header columns now constrain long titles and actions wrap below the title on narrow screens; browser
+  qualification also stress-checks valid 200-character unbroken titles.
 
 The simple organization lock favors correctness and serializes command writes
 within a tenant. Aggregate revisions deliberately conflict even across different

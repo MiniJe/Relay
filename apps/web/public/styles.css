@@ -75,3 +75,5 @@
 
 /* Incident command stays above the two-column workspace at every viewport. */
 .command-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:16px 0}.command-summary strong{display:block;margin-top:5px;overflow-wrap:anywhere}.command-task{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}.command-task>div{min-width:0;overflow-wrap:anywhere}.command-task p{white-space:pre-wrap}.command-task button{flex-shrink:0}#incident-command .toolbar{flex-wrap:wrap}#incident-command summary{cursor:pointer;padding:10px 0}@media(max-width:600px){.command-summary{grid-template-columns:1fr;gap:10px}.command-task{flex-wrap:wrap}.command-task button{width:100%}}
+
+.incident-command-head{display:grid;grid-template-columns:minmax(0,1fr) auto}.incident-command-head>div{min-width:0}.incident-command-head h1{max-width:100%;overflow-wrap:anywhere}@media(max-width:760px){.incident-command-head{grid-template-columns:minmax(0,1fr);align-items:stretch}.incident-command-head .toolbar{flex-wrap:wrap}}
