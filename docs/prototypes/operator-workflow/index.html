@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Relay — operator workflow research</title>
+<link rel="stylesheet" href="prototype.css">
+<body>
+<a class="skip" href="#main">Skip to work</a>
+<div class="lab"><strong>A8 / Research prototype</strong><span>Fictional data · no pages sent · reload resets</span><label>Alerts <select id="volume"><option>5</option><option selected>50</option><option>500</option></select></label><label><input id="failure" type="checkbox"> Simulate publish failure</label></div>
+<header class="appbar"><strong>Relay</strong><nav aria-label="Workspace"><button id="inbox-nav" aria-current="page">Alert inbox</button><button id="incident-nav" disabled>Incident command</button></nav><span>Northstar / Production</span></header>
+<main id="main" tabindex="-1"></main>
+<div id="notice" role="status" aria-live="polite"></div>
+<dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+<script src="prototype.js"></script>
+</body>
+</html>

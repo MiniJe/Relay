@@ -1,0 +1,442 @@
+{
+  "date": "2026-09-29T19:05:59.177Z",
+  "baseCommit": "b829cfb2dc6a16ce93111010604bb308907a719a",
+  "method": "Isolated memory-store fixtures; browser inspection and scripted assertions; no human participants",
+  "baseline": [
+    {
+      "name": "dashboard",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Operations overview",
+      "firstTableTop": 498,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "alerts",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Alerts",
+      "firstTableTop": 297,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": 350,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "alert-detail",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Checkout errors above threshold",
+      "firstTableTop": 324,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": 82,
+      "cardCount": 1,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "incidents",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Incidents",
+      "firstTableTop": 211,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "incident-command",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Checkout availability degraded",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 4,
+      "unlabelledControls": 3
+    },
+    {
+      "name": "services",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Services",
+      "firstTableTop": 287,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 1,
+      "unlabelledControls": 2
+    },
+    {
+      "name": "components",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Components",
+      "firstTableTop": 289,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 1,
+      "unlabelledControls": 4
+    },
+    {
+      "name": "status",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Status pages",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 2,
+      "unlabelledControls": 3
+    },
+    {
+      "name": "teams",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Responder teams",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 2,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "oncall",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "On-call",
+      "firstTableTop": 464,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "routing",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Routing rules",
+      "firstTableTop": 1120,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 2
+    },
+    {
+      "name": "escalations",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Escalations",
+      "firstTableTop": 328,
+      "tableOverflow": [
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        },
+        {
+          "width": 1150,
+          "scrollWidth": 1150
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "settings",
+      "size": "desktop",
+      "documentOverflow": false,
+      "heading": "Settings",
+      "firstTableTop": 1308,
+      "tableOverflow": [
+        {
+          "width": 1114,
+          "scrollWidth": 1114
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 6,
+      "unlabelledControls": 4
+    },
+    {
+      "name": "dashboard",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Operations overview",
+      "firstTableTop": 1039,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "alerts",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Alerts",
+      "firstTableTop": 612,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 1040
+        }
+      ],
+      "ackTop": 674,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "alert-detail",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Checkout errors above threshold",
+      "firstTableTop": 746,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 1040
+        }
+      ],
+      "ackTop": 74,
+      "cardCount": 1,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "incidents",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Incidents",
+      "firstTableTop": 245,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "incident-command",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Checkout availability degraded",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 4,
+      "unlabelledControls": 3
+    },
+    {
+      "name": "services",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Services",
+      "firstTableTop": 442,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 1,
+      "unlabelledControls": 2
+    },
+    {
+      "name": "components",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Components",
+      "firstTableTop": 497,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 1,
+      "unlabelledControls": 4
+    },
+    {
+      "name": "status",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Status pages",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 2,
+      "unlabelledControls": 3
+    },
+    {
+      "name": "teams",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Responder teams",
+      "firstTableTop": -1,
+      "tableOverflow": [],
+      "ackTop": -1,
+      "cardCount": 2,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "oncall",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "On-call",
+      "firstTableTop": 461,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "routing",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Routing rules",
+      "firstTableTop": 1680,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 3,
+      "unlabelledControls": 2
+    },
+    {
+      "name": "escalations",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Escalations",
+      "firstTableTop": 685,
+      "tableOverflow": [
+        {
+          "width": 360,
+          "scrollWidth": 1040
+        },
+        {
+          "width": 360,
+          "scrollWidth": 360
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 0,
+      "unlabelledControls": 0
+    },
+    {
+      "name": "settings",
+      "size": "mobile",
+      "documentOverflow": false,
+      "heading": "Settings",
+      "firstTableTop": 2661,
+      "tableOverflow": [
+        {
+          "width": 324,
+          "scrollWidth": 720
+        }
+      ],
+      "ackTop": -1,
+      "cardCount": 6,
+      "unlabelledControls": 4
+    }
+  ],
+  "prototype": [
+    {
+      "check": "bounded rows",
+      "volume": 5,
+      "rendered": 5
+    },
+    {
+      "check": "bounded rows",
+      "volume": 50,
+      "rendered": 25
+    },
+    {
+      "check": "bounded rows",
+      "volume": 500,
+      "rendered": 25
+    },
+    {
+      "check": "command and review containment",
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "check": "command and review containment",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "check": "command and review containment",
+      "width": 320,
+      "height": 740
+    },
+    {
+      "check": "full journey, public canary, failed publish and retry, preserved draft, modal focus, pagination, search, bulk scope, no page exceptions",
+      "passed": true
+    }
+  ],
+  "publicBoundary": {
+    "titleVisibleBeforePublicMessage": true,
+    "internalNoteAbsent": true,
+    "internalSummaryAbsent": true
+  }
+}
