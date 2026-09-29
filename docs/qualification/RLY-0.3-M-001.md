@@ -4,6 +4,14 @@ Local qualification: **PASS**, 2026-09-30 (Europe/Bucharest). Integration
 readiness also requires the dedicated PR checks; no merge/tag/publication or
 production deployment was performed by this mandate.
 
+Dedicated [PR #7](https://github.com/MiniJe/Relay/pull/7) targets
+`release/rly-0.2-qualification`. Implementation commit `4575094` passed both
+[relay-ci](https://github.com/MiniJe/Relay/actions/runs/36633688445) and the full
+[release-verification](https://github.com/MiniJe/Relay/actions/runs/36633688519)
+on Linux, including Docker, browser, command E2E and restart persistence.
+The final display-separator cleanup and refreshed captures are checked again
+by the same PR workflows; current results are available on the PR checks.
+
 ## Baseline and scope
 
 - Repository: `MiniJe/Relay`.
