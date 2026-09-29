@@ -1,0 +1,12 @@
+{
+  "name": "relay-picovolt-archive-experiment",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "test": "node --experimental-wasm-modules --test archive.test.mjs",
+    "demo": "node --experimental-wasm-modules demo.mjs",
+    "benchmark": "node --experimental-wasm-modules benchmark.mjs"
+  },
+  "dependencies": { "picovolt": "2.3.0" }
+}

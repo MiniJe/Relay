@@ -1,0 +1,252 @@
+{
+  "mandate": "RLY-PV-RFC-001",
+  "measuredAt": "2026-09-29T18:49:23.404Z",
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpu": "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz",
+    "logicalCpus": 40,
+    "node": "v24.21.0",
+    "sqlite": "3.53.4"
+  },
+  "picovolt": {
+    "version": "2.3.0",
+    "integrity": "sha512-TcqrOa5Uddyx9ilV71jHu2ciknVV6gYEfOgYomrHfp8X4Aslcy52Dp9rOHog8+Y+5Cw5Jyxwfs7h4ZpsmsTTEg=="
+  },
+  "method": "Deterministic synthetic incidents, one tenant, four severities, short repeated public updates. Sequential single-process warm runs; 3 warmups/30 query samples, 1 warmup/10 read-and-open samples. Same projected rows; no network or server. Open includes file read; PicoVolt includes SHA-256 and engine source/index validation, JSON includes parse, SQLite opens and forces COUNT. Build timings include projection but exclude file writes for JSON/PicoVolt; SQLite includes file creation and one FULL synchronous transaction. Build costs are descriptive, not equivalent durability comparisons. Process RSS includes all engines/corpora; not attributed. No cache flush, CPU isolation, power-cut, throughput, relevance or production-load claim.",
+  "workloads": [
+    {
+      "count": 1000,
+      "projectedSha256": "3c7aa287083630ca7f7330ef510b7a3cfbeca3532a5708df7950773117cb2533",
+      "bytes": {
+        "json": 245780,
+        "picoVoltPlain": 496220,
+        "picoVoltIndexed": 704381,
+        "sqlite": 208896
+      },
+      "buildMs": {
+        "json": 4.51039999999999,
+        "picoVoltPlain": 32.30990000000003,
+        "picoVoltIndexed": 154.17789999999997,
+        "sqlite": 30.824000000000012
+      },
+      "list": {
+        "json": {
+          "n": 30,
+          "p50Ms": 0.02600000000001046,
+          "p95Ms": 0.045099999999990814
+        },
+        "picoVolt": {
+          "n": 30,
+          "p50Ms": 0.7738000000000511,
+          "p95Ms": 0.9022999999999683
+        },
+        "sqlite": {
+          "n": 30,
+          "p50Ms": 0.17540000000002465,
+          "p95Ms": 0.23340000000001737
+        }
+      },
+      "point": {
+        "json": {
+          "n": 30,
+          "p50Ms": 0.014999999999986358,
+          "p95Ms": 0.02800000000002001
+        },
+        "picoVolt": {
+          "n": 30,
+          "p50Ms": 0.009700000000009368,
+          "p95Ms": 0.020800000000008367
+        },
+        "sqlite": {
+          "n": 30,
+          "p50Ms": 0.12250000000000227,
+          "p95Ms": 0.13980000000003656
+        }
+      },
+      "search": {
+        "named": {
+          "n": 30,
+          "p50Ms": 1.530499999999961,
+          "p95Ms": 1.7557999999999652
+        },
+        "ephemeral": {
+          "n": 30,
+          "p50Ms": 9.642499999999927,
+          "p95Ms": 10.51400000000001
+        }
+      },
+      "open": {
+        "json": {
+          "n": 10,
+          "p50Ms": 2.919300000000021,
+          "p95Ms": 3.113200000000006
+        },
+        "picoVolt": {
+          "n": 10,
+          "p50Ms": 40.17679999999996,
+          "p95Ms": 51.877500000000055
+        },
+        "sqlite": {
+          "n": 10,
+          "p50Ms": 1.5207000000000335,
+          "p95Ms": 2.47400000000016
+        }
+      }
+    },
+    {
+      "count": 10000,
+      "projectedSha256": "fbbaa537cadcd349790993342bebca75880966c370e7ff590335f1836a065ebf",
+      "bytes": {
+        "json": 2486781,
+        "picoVoltPlain": 5038852,
+        "picoVoltIndexed": 7125769,
+        "sqlite": 2048000
+      },
+      "buildMs": {
+        "json": 32.297199999999975,
+        "picoVoltPlain": 289.47320000000013,
+        "picoVoltIndexed": 557.9791,
+        "sqlite": 78.89369999999963
+      },
+      "list": {
+        "json": {
+          "n": 30,
+          "p50Ms": 0.2545000000000073,
+          "p95Ms": 0.2962999999999738
+        },
+        "picoVolt": {
+          "n": 30,
+          "p50Ms": 7.356200000000172,
+          "p95Ms": 7.636300000000119
+        },
+        "sqlite": {
+          "n": 30,
+          "p50Ms": 0.1811000000002423,
+          "p95Ms": 0.20269999999982247
+        }
+      },
+      "point": {
+        "json": {
+          "n": 30,
+          "p50Ms": 0.07650000000012369,
+          "p95Ms": 0.11639999999988504
+        },
+        "picoVolt": {
+          "n": 30,
+          "p50Ms": 0.009900000000016007,
+          "p95Ms": 0.010899999999764987
+        },
+        "sqlite": {
+          "n": 30,
+          "p50Ms": 0.12710000000015498,
+          "p95Ms": 0.1528000000002976
+        }
+      },
+      "search": {
+        "named": {
+          "n": 30,
+          "p50Ms": 16.3421000000003,
+          "p95Ms": 18.41840000000002
+        },
+        "ephemeral": {
+          "n": 30,
+          "p50Ms": 120.63670000000002,
+          "p95Ms": 134.64630000000034
+        }
+      },
+      "open": {
+        "json": {
+          "n": 10,
+          "p50Ms": 15.380500000000211,
+          "p95Ms": 21.964200000000346
+        },
+        "picoVolt": {
+          "n": 10,
+          "p50Ms": 449.5065999999988,
+          "p95Ms": 608.9607999999989
+        },
+        "sqlite": {
+          "n": 10,
+          "p50Ms": 2.721400000000358,
+          "p95Ms": 3.0733999999993102
+        }
+      }
+    }
+  ],
+  "compatibility": [
+    {
+      "name": "timestamp default",
+      "sql": "CREATE TABLE users (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+      "accepted": false,
+      "error": "query parse error: DEFAULT supports only NULL, integer, decimal, and text literals (line 1, column 82)\n  CREATE TABLE users (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT now())\n                                                                                   ^"
+    },
+    {
+      "name": "composite primary key",
+      "sql": "CREATE TABLE memberships (organization_id TEXT, user_id TEXT, PRIMARY KEY (organization_id,user_id))",
+      "accepted": false,
+      "error": "query parse error: unsupported table constraint `PRIMARY` (line 1, column 63)\n  CREATE TABLE memberships (organization_id TEXT, user_id TEXT, PRIMARY KEY (organization_id,user_id))\n                                                                ^"
+    },
+    {
+      "name": "foreign key",
+      "sql": "CREATE TABLE children (id TEXT, parent_id TEXT REFERENCES t(id))",
+      "accepted": false,
+      "error": "query parse error: unsupported column constraint or type modifier `REFERENCES` (line 1, column 48)\n  CREATE TABLE children (id TEXT, parent_id TEXT REFERENCES t(id))\n                                                 ^"
+    },
+    {
+      "name": "PostgreSQL placeholder",
+      "sql": "SELECT * FROM t WHERE id=$1",
+      "accepted": false,
+      "error": "schema error: 1 parameters provided but the statement has 0 placeholder(s)"
+    },
+    {
+      "name": "RETURNING",
+      "sql": "INSERT INTO t VALUES ('x','a','b') RETURNING *",
+      "accepted": false,
+      "error": "query parse error: unsupported or misplaced SQL construct `RETURNING` (line 1, column 36)\n  INSERT INTO t VALUES ('x','a','b') RETURNING *\n                                     ^"
+    },
+    {
+      "name": "multi-column update",
+      "sql": "UPDATE t SET a='a',b='b' WHERE id='x'",
+      "accepted": false,
+      "error": "query parse error: expected `where`, found Comma (line 1, column 19)\n  UPDATE t SET a='a',b='b' WHERE id='x'\n                    ^"
+    },
+    {
+      "name": "SKIP LOCKED",
+      "sql": "SELECT id FROM t ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10",
+      "accepted": false,
+      "error": "query parse error: unsupported or misplaced SQL construct `FOR` (line 1, column 30)\n  SELECT id FROM t ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10\n                               ^"
+    },
+    {
+      "name": "JSONB cast",
+      "sql": "INSERT INTO t VALUES (?,?::text::jsonb,?)",
+      "accepted": false,
+      "error": "query parse error: unexpected character `:` (line 1, column 31)\n  INSERT INTO t VALUES ('x','{}'::text::jsonb,'b')\n                                ^"
+    },
+    {
+      "name": "conflict clause",
+      "sql": "INSERT INTO t VALUES ('x','a','b') ON CONFLICT DO NOTHING",
+      "accepted": false,
+      "error": "query parse error: unsupported or misplaced SQL construct `ON` (line 1, column 36)\n  INSERT INTO t VALUES ('x','a','b') ON CONFLICT DO NOTHING\n                                     ^"
+    },
+    {
+      "name": "composite join predicate",
+      "sql": "SELECT t.id FROM t JOIN u ON t.id=u.id AND t.a=u.a",
+      "accepted": false,
+      "error": "query parse error: unsupported or misplaced SQL construct `AND` (line 1, column 40)\n  SELECT t.id FROM t JOIN u ON t.id=u.id AND t.a=u.a\n                                         ^"
+    },
+    {
+      "name": "question-mark SELECT control",
+      "sql": "SELECT id FROM t WHERE id=?",
+      "accepted": true
+    }
+  ],
+  "processMemoryEnd": {
+    "rss": 196050944,
+    "heapTotal": 19308544,
+    "heapUsed": 14588440,
+    "external": 177127589,
+    "arrayBuffers": 19434157
+  }
+}

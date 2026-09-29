@@ -7,3 +7,4 @@ coverage
 *.log
 relay-*.zip
 .DS_Store
+experiments/picovolt-archive
