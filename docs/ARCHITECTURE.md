@@ -1,7 +1,7 @@
 # Relay Architecture
 
 Covers Release 0.1 (core incident lifecycle) and the Release 0.2 additions
-(alert routing and on-call). [`RELAY-0.1.md`](./RELAY-0.1.md) and
+(alert routing, on-call, escalation and durable delivery). [`RELAY-0.1.md`](./RELAY-0.1.md) and
 [`RELAY-0.2.md`](./RELAY-0.2.md) describe the releases themselves;
 [`ONCALL.md`](./ONCALL.md) specifies on-call resolution in full.
 
@@ -11,10 +11,10 @@ Relay is a modular monolith. A single Node.js runtime serves the REST API, SSE s
 
 This is intentionally not a microservice design. The major modules are still separated so future releases can split responsibilities if operational scale justifies it.
 
-Relay 0.2 adds no new process, no queue and no scheduler. Alert routing is a
-synchronous pass inside the existing intake request, and on-call resolution is a
-pure function over stored configuration. A routing engine that needs a worker
-fleet to answer "who is on call now" would not be self-hostable.
+Alert routing is a synchronous pass inside the existing intake request, and
+on-call resolution is a pure function over stored configuration. M-002 adds a
+PostgreSQL-backed delivery outbox and a polling worker in the same Node process;
+provider calls happen outside database transactions.
 
 ## Repository map
 
@@ -23,6 +23,9 @@ apps/api/src/          HTTP/API/auth/security/realtime/integration orchestration
   app.mjs                all versioned REST routes
   routing.mjs            0.2 alert routing pipeline + on-call state assembly
   discord.mjs            Discord webhook adapter (incidents and routed alerts)
+  delivery.mjs           durable delivery and provider dispatch
+  worker.mjs             leased delivery and escalation polling worker
+  slack.mjs, email.mjs   Slack Incoming Webhook and SMTP adapters
 apps/web/public/       responsive application + public status UI
 packages/shared/       domain state machines and input validation
   domain.mjs             roles, severities, lifecycle transitions, public aggregation
@@ -32,6 +35,7 @@ packages/shared/       domain state machines and input validation
 packages/database/     PostgreSQL + verification stores and migrations
   migrations/001_initial.sql              Release 0.1 schema (immutable)
   migrations/002_alert_routing_oncall.sql Release 0.2 forward migration
+  migrations/003_escalation_delivery.sql   Release 0.2 durable-delivery migration
   sql.mjs                                 migration discovery/ordering/statement split
 tests/                 unit, API integration, E2E and PostgreSQL contract tests
 docs/                  architecture, API, security and release documentation
@@ -71,11 +75,11 @@ The effective state is the worst of configured and incident-derived state. Resol
 
 ## Persistence
 
-PostgreSQL is the permanent source of truth. `001_initial.sql` creates all Release 0.1 tables and constraints; `002_alert_routing_oncall.sql` adds the Release 0.2 routing and on-call schema. `schema_migrations` tracks applied migrations.
+PostgreSQL is the permanent source of truth. `001_initial.sql` creates all Release 0.1 tables and constraints; `002_alert_routing_oncall.sql` adds routing and on-call; `003_escalation_delivery.sql` adds the durable outbox, attempts and escalation plan. `schema_migrations` tracks applied migrations.
 
 Migrations are **discovered, not hardcoded**. `packages/database/sql.mjs` reads
 the migrations directory, filters to `NNN_name.sql`, and sorts by numeric prefix
-then name, so adding `003_*.sql` in a future release requires no code change.
+then name, so the M-002 `003_*.sql` migration required no runner change.
 Each migration runs in its own transaction together with its `schema_migrations`
 row: a failure leaves the database at the last fully-applied migration rather
 than half-migrated. `001_initial.sql` is never edited, and a populated 0.1
@@ -134,8 +138,9 @@ brackets stripped, `@everyone`/`@here` defanged, control characters removed) and
 `allowed_mentions` is pinned to the mapped responder, so alert content supplied
 by a third-party monitoring system can never forge a mention or an embed.
 
-A second channel (email, SMS, Slack, …) belongs behind this same adapter
-boundary, recorded through the existing `notificationProvider` column.
+M-002 adds Slack Incoming Webhook and SMTP email adapters behind the same
+boundary. Each logical page and bounded provider attempt is recorded in
+`notification_deliveries` and `notification_attempts`; SMS remains future work.
 
 ## Alert intake and routing
 
@@ -197,13 +202,13 @@ startup banner all read it, and `scripts/build.mjs` fails if it disagrees with
 `package.json`, so a version cannot drift between the API, the specification,
 the logs and the published package.
 
-## M-002 escalation data (partial)
+## M-002 escalation and durable delivery
 
 Migration `003_escalation_delivery.sql` adds organization-scoped escalation
 policies/steps, rule-level channel/policy fields, immutable escalation-job
 snapshots, notification-delivery rows and attempt audit. `packages/shared/escalation.mjs`
 contains ordered-step validation, original-route due-time calculation,
-acknowledgement cancellation helpers and bounded retry classification. The
-PostgreSQL dispatcher/lease loop and provider adapters are not yet qualified;
-therefore the schema must not be mistaken for a production durable-delivery
-implementation. See [ESCALATION.md](ESCALATION.md).
+acknowledgement cancellation helpers and bounded retry classification.
+`apps/api/src/worker.mjs` claims due work with PostgreSQL leases and recovers
+expired claims after a restart. See [ESCALATION.md](ESCALATION.md) and the
+[0.2 qualification ledger](qualification/RLY-0.2-M-003.md).

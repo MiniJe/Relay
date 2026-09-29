@@ -195,16 +195,16 @@ serialized public payload.
   can page on-call responders. Protect it accordingly; scoped ingest credentials
   are appropriate future work.
 - There is no password reset/email verification workflow.
-- Notification delivery makes one attempt with no retry queue. A `FAILED` record
-  is visible and re-pageable by a human, but Relay will not autonomously retry.
-- There is no escalation policy: if the resolved responder does not acknowledge,
-  nothing further happens automatically.
+- Provider delivery is at-least-once under network ambiguity: a provider may
+  accept a message just before Relay loses the response, and a bounded retry
+  can produce a duplicate external page. Logical deliveries and every attempt
+  remain auditable in PostgreSQL.
 - On-call resolution trusts the server clock. A deployment with a badly skewed
   clock will resolve the wrong rotation position; NTP discipline is an operator
   responsibility.
 
 These are disclosed limitations, not authorization to implement future enterprise
-identity, escalation or autonomous-paging scope.
+identity or additional paging channels.
 
 ## Escalation configuration boundary
 

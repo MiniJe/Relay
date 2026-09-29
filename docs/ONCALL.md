@@ -267,7 +267,7 @@ Alert intake in Relay 0.2 runs these stages in order:
 5. resolve schedule   enabled? participants? rotation started?
 6. resolve responder  override, else rotation, at the routing instant
 7. persist result     immutable audit record with snapshotted names
-8. notify             Discord (one attempt), outcome recorded
+8. enqueue            durable per-channel delivery intent; worker records attempts
 ```
 
 ### Stage 3 is the durability boundary
@@ -276,7 +276,7 @@ The alert and a `PENDING` routing record are committed together **before** any
 evaluation happens. Stages 4-8 may fail for any reason — a deleted schedule, an
 empty rotation, a malformed timezone in legacy data, a Discord outage — and the
 alert remains stored, listed and queryable. A failure is recorded on the routing
-record and returned to the caller as a warning:
+record and returned to the caller as a warning when applicable:
 
 ```json
 { "code": "ALERT_NOTIFICATION_FAILED",
@@ -343,11 +343,12 @@ distinguishable from "not routed":
 | `SKIPPED_DISABLED` | The Discord integration exists but is disabled. |
 | `SKIPPED_NO_RESPONDER` | Nothing to page. |
 
-Relay 0.2 makes **one** delivery attempt. There is no retry queue. A `FAILED`
-record is visible in the Alerts table and the routing audit, and an operator can
-re-page explicitly with `route` + `renotify`. Silent background retries that
-page a human being an unknown number of times is a worse failure mode than a
-visible, actionable `FAILED`.
+The routing record keeps the immediate Discord outcome for historical
+compatibility. M-002 also writes one durable delivery row per configured channel
+and records each provider attempt separately. Retryable failures receive at most
+two automatic retries, at one and five minutes; an authorized operator may
+request a manual retry of a terminal failure. See [ESCALATION.md](ESCALATION.md)
+for the delivery state machine and audit contract.
 
 ---
 
@@ -473,20 +474,17 @@ These are boundaries, not defects, and each is recorded as deferred in
 
 - one rotation type (fixed duration). No weekly layering, no per-person weights,
   no shift swaps, no self-service handover;
-- no escalation policies. One responder is paged once; if they do not
-  acknowledge, a human must act;
-- one notification channel (Discord). No email, SMS, push or Slack;
-- one delivery attempt, no retry queue;
+- no SMS, phone-call or native push notification channel;
 - no calendar import/export;
 - one rule target kind (an on-call schedule). No webhook or queue targets;
 - no alert grouping, correlation, silencing or maintenance windows beyond
   `externalId` idempotency;
 - DST shifts the local handoff time rather than the handoff duration (§4).
 
-## Escalation policy definitions (M-002 partial)
+## Escalation and delivery (M-002)
 
 Policies are organization scoped and attach to routing rules, not schedules.
 Their steps are strictly ordered by position and delay; `afterMinutes` is
-measured from the initial route. The current implementation provides policy
-configuration and snapshot materialization, but not yet the durable execution
-worker or channel delivery completion. See [ESCALATION.md](ESCALATION.md).
+measured from the initial route. The durable worker resolves the responder when
+each step becomes due, and Discord, Slack Incoming Webhook and responder email
+deliveries carry bounded attempt history. See [ESCALATION.md](ESCALATION.md).

@@ -48,8 +48,8 @@ The migration command is safe to re-run. `schema_migrations` prevents reapplying
 
 Migrations are discovered from `packages/database/migrations/`, sorted by numeric
 filename prefix and applied in order, each in its own transaction with its
-`schema_migrations` row. Nothing is hardcoded to a specific release, so adding
-`003_*.sql` later requires no code change. `001_initial.sql` is never edited.
+`schema_migrations` row. The Relay 0.2 chain currently ends at
+`003_escalation_delivery.sql`; `001_initial.sql` is never edited.
 
 To verify that a populated Relay 0.1 database upgrades cleanly to 0.2 without
 rewriting any 0.1 data:
@@ -98,7 +98,10 @@ The suite includes:
 - static-asset routing tests (`static-routing.test.mjs`);
 - a 0.1 → 0.2 migration upgrade test (`migration-upgrade.test.mjs`) and a
   PostgreSQL migration/store contract test (`postgres.contract.test.mjs`), both
-  active only when `DATABASE_URL` is present.
+  active only when `DATABASE_URL` is present;
+- durable delivery, provider, escalation and concurrent worker qualification
+  (`durable-delivery.test.mjs`, `providers.test.mjs`, `escalation.test.mjs`,
+  `worker.qualification.test.mjs`); the worker tests require `DATABASE_URL`.
 
 CI provides PostgreSQL, so the database-backed tests run there rather than
 skipping. Focused runs:
@@ -165,11 +168,10 @@ memory would fail the run.
 5. If persistence changed, test `npm run migrate` against a clean PostgreSQL database.
 6. Review tenant boundaries and public-data filtering before merge.
 
-## Escalation development status
+## Relay 0.2 qualification
 
-`npm test` includes deterministic domain tests for ordered policy steps,
-route-relative due times, snapshot behavior, acknowledgement cancellation and
-bounded retry calculation. PostgreSQL qualification for migration 003 requires
-a real `DATABASE_URL`; this checkout has no database configured. The current
-M-002 implementation remains partial, and worker restart/production/browser
-qualification is not available yet. See [ESCALATION.md](ESCALATION.md).
+Run `npm test` with `DATABASE_URL` set to a disposable PostgreSQL 16 database so
+the migration, store and worker tests cannot skip. The release workflow also
+builds and starts Docker Compose, runs the browser and production E2E scripts,
+restarts the Relay container and verifies persisted state. Exact commands and
+results are recorded in [RLY-0.2-M-003.md](qualification/RLY-0.2-M-003.md).

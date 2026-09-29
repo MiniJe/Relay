@@ -1,14 +1,14 @@
 # Escalation and durable delivery (Relay 0.2 M-002)
 
-> **Implementation status: complete in source, pending Founder integration and
-> release qualification.** Policy CRUD, deterministic plan materialization, the
+> **Implementation status: implemented and release-qualified for integration.**
+> Policy CRUD, deterministic plan materialization, the
 > PostgreSQL outbox/attempt schema, the leasing worker with recovery, the
 > Discord/Slack/SMTP provider adapters, delivery and escalation REST reads, the
 > manual-retry operation and the operator surfaces are implemented and covered
 > by the test suite, the PostgreSQL worker qualification, the production
 > deployment verification and the browser smoke. Qualification evidence is
-> produced by CI on a real PostgreSQL cluster and a real browser; see
-> [Verification](#verification).
+> produced on PostgreSQL 16 and a real browser; see
+> [Verification](#verification) and the [qualification ledger](qualification/RLY-0.2-M-003.md).
 
 ## Policy semantics
 
