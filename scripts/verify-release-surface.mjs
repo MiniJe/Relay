@@ -18,6 +18,10 @@ const baseUrl = (process.env.RELAY_VERIFY_BASE_URL ?? 'http://127.0.0.1:4000').r
 
 /** Every Relay 0.2 path the OpenAPI document must describe. */
 const requiredPaths = [
+  '/organizations/{organizationId}/incidents/{incidentId}/tasks',
+  '/organizations/{organizationId}/incidents/{incidentId}/handoffs',
+  '/organizations/{organizationId}/incidents/{incidentId}/communication-plan',
+  '/organizations/{organizationId}/incidents/{incidentId}/commander/reassign',
   '/alerts',
   '/organizations/{organizationId}/members',
   '/organizations/{organizationId}/teams',
@@ -135,4 +139,4 @@ for (const internal of ['oncall', 'schedule', 'rotation', 'responder', 'routing'
   assert.equal(publicBody.toLowerCase().includes(internal), false, `the public 404 body must not mention ${internal}`);
 }
 
-console.log(`Release surface PASS: Relay ${RELAY_VERSION} — health, package.json and OpenAPI agree; ${requiredPaths.length} documented 0.2 paths; ${requiredSchemas.length} schemas; ${requiredUiRoutes.length} SPA routes; ${requiredBundleHooks.length} operator hooks; no secrets in shipped assets.`);
+console.log(`Release surface PASS: Relay ${RELAY_VERSION} — health, package.json and OpenAPI agree; ${requiredPaths.length} documented paths; ${requiredSchemas.length} schemas; ${requiredUiRoutes.length} SPA routes; ${requiredBundleHooks.length} operator hooks; no secrets in shipped assets.`);

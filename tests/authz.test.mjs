@@ -38,6 +38,6 @@ test('representative OWNER/ADMIN/RESPONDER/VIEWER permissions and tenant-scoped 
 
   r=await owner.client.request(`/api/v1/organizations/${org.id}/incidents`,{method:'POST',body:{title:'Invalid commander create',severity:'SEV4',commanderUserId:outsider.user.id,affectedServiceIds:[],affectedComponentIds:[]}});assert.equal(r.res.status,400);assert.equal(r.json.error.code,'INVALID_COMMANDER');
   r=await owner.client.request(`/api/v1/organizations/${org.id}/incidents`,{method:'POST',body:{title:'Valid commander incident',severity:'SEV4',affectedServiceIds:[],affectedComponentIds:[]}});assert.equal(r.res.status,201);const incident=r.json.data;
-  r=await owner.client.request(`/api/v1/organizations/${org.id}/incidents/${incident.id}`,{method:'PATCH',body:{commanderUserId:outsider.user.id}});assert.equal(r.res.status,400);assert.equal(r.json.error.code,'INVALID_COMMANDER');
+  r=await owner.client.request(`/api/v1/organizations/${org.id}/incidents/${incident.id}`,{method:'PATCH',body:{commanderUserId:outsider.user.id}});assert.equal(r.res.status,409);assert.equal(r.json.error.code,'HANDOFF_REQUIRED');
   r=await outsider.client.request(`/api/v1/organizations/${org.id}/incidents/${incident.id}`);assert.equal(r.res.status,403);
 });

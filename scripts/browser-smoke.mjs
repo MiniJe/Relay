@@ -484,6 +484,35 @@ async function main() {
       const dialogProblems = page.problems(page.take());
       check('incident dialog pass free of console/exception/MIME/request failures', dialogProblems.length === 0, dialogProblems.join(' | '));
 
+      const commandIncidentPath=await page.evaluate('location.pathname');
+      check('current commander is visible in incident command',await page.evaluate(`!!document.querySelector('#current-commander')?.textContent.trim()`));
+      await page.evaluate(`(() => {document.querySelector('#add-command-task').focus();document.querySelector('#add-command-task').click();})()`);
+      check('task dialog opens with keyboard focus inside',await page.evaluate(`!!document.querySelector('#command-dialog-form') && document.querySelector('.modal').contains(document.activeElement)`));
+      await page.evaluate(`(() => {const input=document.querySelector('#command-title');input.value='PRIVATE browser task ${marker}';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#command-dialog-form button[type=submit]').click();})()`);
+      check('assigned-work foundation creates a visible task',await page.waitForCondition(`!!document.querySelector('[data-edit-task]') && document.body.textContent.includes('PRIVATE browser task ${marker}')`));
+      await page.evaluate(`document.querySelector('[data-edit-task]').click()`);
+      await page.waitForCondition(`!!document.querySelector('#command-state')`);
+      await page.evaluate(`(() => {document.querySelector('#command-state').value='BLOCKED';document.querySelector('#command-blockedReason').value='PRIVATE browser blocked reason';document.querySelector('#command-dialog-form button[type=submit]').click();})()`);
+      check('task lifecycle shows blocked reason',await page.waitForCondition(`!document.querySelector('.modal-backdrop') && document.body.textContent.includes('Blocked: PRIVATE browser blocked reason')`));
+      await page.evaluate(`(() => {document.querySelector('#communication-plan').closest('details').open=true;document.querySelector('#communication-owner').selectedIndex=1;document.querySelector('#communication-deadline').value='2026-09-29T14:00';document.querySelector('#communication-plan button').click();})()`);
+      check('private communication plan displays owner and overdue target',await page.waitForCondition(`document.querySelector('#incident-command')?.textContent.includes('Overdue')`));
+      // A competing legacy write must preserve the task draft and demand review.
+      await page.evaluate(`document.querySelector('[data-edit-task]').click()`);
+      await page.waitForCondition(`!!document.querySelector('#command-title')`);
+      await page.evaluate(`(async()=>{document.querySelector('#command-title').value='PRIVATE preserved conflict draft';const path=location.pathname.replace('/app/','/api/v1/organizations/'+localStorage.getItem('relay.orgId')+'/');await fetch(path+'/updates',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:'Competing command operator note',isPublic:false})});document.querySelector('#command-dialog-form button[type=submit]').click();})()`);
+      check('stale task edit preserves draft with explicit review action',await page.waitForCondition(`!!document.querySelector('.command-conflict') && document.querySelector('#command-title')?.value==='PRIVATE preserved conflict draft'`));
+      const expectedConflictProblems=page.problems(page.take());
+      check('competing task write produces only the expected HTTP 412 diagnostic',expectedConflictProblems.every((p)=>/^console error:.*412.*Precondition Failed/.test(p)),expectedConflictProblems.join(' | '));
+      await page.evaluate(`document.querySelector('.command-conflict button').click()`);
+      await page.waitForCondition(`document.querySelector('.command-conflict button')?.disabled`);
+      await page.evaluate(`document.querySelector('#command-dialog-form button[type=submit]').click()`);
+      check('deliberate conflict retry saves reviewed task draft',await page.waitForCondition(`!document.querySelector('.modal-backdrop') && document.querySelector('.command-task')?.textContent.includes('PRIVATE preserved conflict draft')`));
+      await page.evaluate(`(() => {document.querySelector('#recover-command').focus();document.querySelector('#recover-command').click();})()`);
+      check('administrative recovery explicitly explains bypassing acceptance',await page.evaluate(`document.querySelector('.modal')?.textContent.includes('bypasses acceptance')`));
+      await cdp.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27},page.sessionId);
+      await cdp.send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27},page.sessionId);
+      check('command dialog Escape restores keyboard focus',await page.evaluate(`!document.querySelector('.modal-backdrop') && document.activeElement?.id==='recover-command'`));
+
       // Internal notes publish directly.
       await page.evaluate(`(() => { const area = document.querySelector('#update-form textarea[name=message]'); area.value = 'Internal smoke note ${marker}. Responders only.'; area.dispatchEvent(new Event('input', { bubbles: true })); })()`);
       await page.evaluate(`document.querySelector('#update-form button[type=submit]').click()`);
@@ -810,11 +839,11 @@ async function main() {
 
       // Operator routes must hold at both representative viewports.
       const dashOverflow = {};
-      for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
+      for (const viewport of VIEWPORTS) {
         await page.setViewport(viewport);
         await page.waitForCondition(`document.documentElement.clientWidth <= ${viewport.width}`);
         await page.goto(`${baseUrl}/app`, { waitFor: `!!document.querySelector('.app-shell')` });
-        for (const route of ['/app', '/app/alerts', '/app/escalations', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages']) {
+        for (const route of ['/app', '/app/alerts', '/app/escalations', '/app/oncall', '/app/incidents', '/app/services', '/app/components', '/app/teams', '/app/routing', '/app/status-pages', commandIncidentPath]) {
           if (route !== '/app') await page.goto(`${baseUrl}${route}`, { waitFor: `!!document.querySelector('.app-shell')` });
           const measured = await page.evaluate(`(() => {
             const cw = document.documentElement.clientWidth;
@@ -833,7 +862,8 @@ async function main() {
           dashOverflow[`${viewport.label} ${route}`] = delta;
           check(`no page-level horizontal overflow at ${viewport.label} on ${route}`, delta <= 1, `+${delta}px past a ${await page.evaluate('document.documentElement.clientWidth')}px viewport; offenders: ${(measured.offenders ?? []).join(' , ') || 'none identified'}`);
         }
-        const file = await page.screenshot(`dashboard-${viewport.label}`);
+        check(`incident command actions visible at ${viewport.label}`,await page.evaluate(`!!document.querySelector('#add-command-task') && !!document.querySelector('#recover-command') && !!document.querySelector('#current-commander')`));
+        const file = await page.screenshot(`incident-command-${viewport.label}`);
         if (file) console.log(`      screenshot: ${file}`);
       }
       await page.setViewport(VIEWPORTS[0]);

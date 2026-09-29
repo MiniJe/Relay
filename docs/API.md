@@ -485,3 +485,13 @@ Delivery reads always expose operator-readable labels (`Sent`, `Delivery failed`
 `Executed`, `Unresolved`, `Cancelled (acknowledged)`) and never a secret. A
 delivery carries a non-secret destination snapshot: integration id and name,
 recipient email for email pages, and the Discord mention id when one was used.
+
+## Relay 0.3 incident command
+
+See [the incident command API table and compatibility notes](INCIDENT-COMMAND.md#api-and-compatibility).
+New task, handoff, commander-recovery and communication-plan commands require
+the exact incident GET ETag in If-Match. Existing incident mutations accept it
+optionally; the browser always sends it. Commander PATCH changes now return
+HANDOFF_REQUIRED. Public publication can submit reviewedScope for atomic
+component/page audience checking. OpenAPI contains request/response schemas,
+role restrictions, replay semantics and error codes.

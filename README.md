@@ -1,6 +1,20 @@
-# Relay 0.2
+# Relay 0.3 incident command foundation
 
 Relay is an open-source incident operations and public status platform. Release 0.1 proved one canonical incident lifecycle from declaration through coordination, public communication, resolution, and postmortem. Release 0.2 adds the layer upstream of the incident: **alert routing and an on-call foundation** that answers "who is responsible right now?" deterministically.
+
+## Incident command foundation in 0.3
+
+The canonical incident now exposes current commander, accepted handoff,
+assigned work and private next-update responsibility in the Quiet Operations
+workspace. New commands enforce tenant/RBAC eligibility, revision conflicts
+and transactional timeline evidence. Public updates keep explicit audience
+review; internal work stays private.
+
+See [`docs/INCIDENT-COMMAND.md`](docs/INCIDENT-COMMAND.md) for lifecycle,
+API/compatibility and forward migration details, and
+[`docs/qualification/RLY-0.3-M-001.md`](docs/qualification/RLY-0.3-M-001.md)
+for integration qualification. This is a foundation candidate; no release tag
+or publication is implied.
 
 ## What works in 0.2
 
@@ -161,6 +175,8 @@ See:
 - `docs/API.md`
 - `docs/SECURITY.md`
 - `docs/ONCALL.md`
+- `docs/INCIDENT-COMMAND.md`
+- `docs/RELAY-0.3.md`
 - `docs/ESCALATION.md`
 - `docs/qualification/RLY-0.2-M-003.md`
 - `docs/RELAY-0.1.md`

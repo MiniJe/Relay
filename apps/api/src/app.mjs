@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { commandInput, incidentEtag, incidentPrecondition, OPERATIONAL_ROLES, timestamp } from '../../../packages/shared/incident-command.mjs';
 import { createServer } from 'node:http';
 import { aggregatePublicStatus, assertIncidentTransition, domainError, SEVERITIES } from '../../../packages/shared/domain.mjs';
 import { componentInput, discordUserId, email, enumValue, id, ids, incidentInput, incidentPatch, metadata, object, organizationInput, overrideInput, password, routingRuleInput, routingRulePatch, scheduleInput, schedulePatch, serviceInput, servicePatch, statusPageInput, string, teamInput, teamPatch } from '../../../packages/shared/validation.mjs';
@@ -42,7 +43,7 @@ async function validateReferences(store,organizationId,serviceIds=[],componentId
 async function validateCommander(store,organizationId,commanderUserId) {
   if(!commanderUserId)return;
   const membership=await store.getMembership(organizationId,commanderUserId);
-  if(!membership)throw domainError('INVALID_COMMANDER','Incident commander must be a member of the organization.',400);
+  if(!OPERATIONAL_ROLES.includes(membership?.role))throw domainError('INVALID_COMMANDER','Incident commander must be a member of the organization.',400);
 }
 
 export function createRelayServer({store,config,fetchImpl=fetch,hub=new RealtimeHub(),logger=console,worker=null,transports={}}) {
@@ -198,7 +199,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
           if(resource==='incidents'){
             await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const input=incidentInput(await readJson(req));await validateReferences(store,organizationId,input.affectedServiceIds,input.affectedComponentIds);const commanderUserId=input.commanderUserId??user.id;await validateCommander(store,organizationId,commanderUserId);
             const incident=await store.createIncident(organizationId,{title:input.title,summary:input.summary,severity:input.severity,creatorUserId:user.id,commanderUserId},input.affectedServiceIds,input.affectedComponentIds,{actorUserId:user.id,eventType:'INCIDENT_CREATED',message:'Incident created.',metadata:{severity:input.severity,affectedServiceIds:input.affectedServiceIds,affectedComponentIds:input.affectedComponentIds}});
-            const warning=await notifyDiscord(organizationId,'created',incident);hub.publish(organizationId,{type:'incident.created',incidentId:incident.id});return sendJson(res,201,{data:incident,...(warning?{warnings:[warning]}:{})});
+            const warning=await notifyDiscord(organizationId,'created',incident);hub.publish(organizationId,{type:'incident.created',incidentId:incident.id});return sendJson(res,201,{data:incident,...(warning?{warnings:[warning]}:{})},{etag:incidentEtag(incident)});
           }
           if(resource==='teams'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=teamInput(await readJson(req));if(!input.slug)throw domainError('VALIDATION_ERROR','Responder team slug is invalid.',400);return sendJson(res,201,{data:await store.createTeam(organizationId,input)});}
           if(resource==='routing-rules'){await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const input=routingRuleInput(await readJson(req));if(!await store.getSchedule(organizationId,input.targetScheduleId))throw domainError('INVALID_REFERENCE','The routing target schedule must belong to the same organization.',400);if(input.matchServiceId&&!await store.getService(organizationId,input.matchServiceId))throw domainError('INVALID_REFERENCE','The matched service must belong to the same organization.',400);if(input.escalationPolicyId&&!await store.getEscalationPolicy(organizationId,input.escalationPolicyId))throw domainError('INVALID_REFERENCE','The escalation policy must belong to the same organization.',400);return sendJson(res,201,{data:await store.createRoutingRule(organizationId,input)});}
@@ -215,40 +216,76 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
         const user=requireUser(session),organizationId=componentItem[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:adminRoles});const current=await store.getComponent(organizationId,componentItem[2]);if(!current)throw domainError('COMPONENT_NOT_FOUND','Component not found.',404);const input=componentInput({...current,...await readJson(req)});await validateReferences(store,organizationId,input.serviceIds,[]);return sendJson(res,200,{data:await store.updateComponent(organizationId,componentItem[2],input)});
       }
 
+      const commandRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)\/(tasks|handoffs|communication-plan|commander\/reassign)(?:\/([a-zA-Z0-9_-]+)(?:\/(accept|decline|cancel|reopen))?)?$/);
+      if(commandRoute){
+        const user=requireUser(session),organizationId=commandRoute[1],incidentId=commandRoute[2],resource=commandRoute[3],entityId=commandRoute[4],decision=commandRoute[5];
+        await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        if(req.method==='GET'&&['tasks','handoffs'].includes(resource)){
+          const incident=await store.getIncident(organizationId,incidentId);if(!incident)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);
+          if(entityId){const entity=incident[resource].find((x)=>x.id===entityId);if(!entity)throw domainError('NOT_FOUND','Operational record not found.',404);return sendJson(res,200,{data:entity,incidentRevision:incident.revision},{etag:incidentEtag(incident)});}
+          const limit=Number(url.searchParams.get('limit')??50);if(!Number.isInteger(limit)||limit<1||limit>100)throw domainError('VALIDATION_ERROR','limit must be between 1 and 100.',400);
+          const context=JSON.stringify([organizationId,incidentId,resource]);let cursor=null;
+          if(url.searchParams.has('cursor')){try{cursor=JSON.parse(Buffer.from(url.searchParams.get('cursor'),'base64url').toString());if(cursor.context!==context||typeof cursor.at!=='string'||typeof cursor.id!=='string')throw new Error();}catch{throw domainError('VALIDATION_ERROR','Invalid collection cursor.',400);}}
+          const rows=incident[resource].slice().sort((a,b)=>a.createdAt<b.createdAt?-1:a.createdAt>b.createdAt?1:a.id<b.id?-1:a.id>b.id?1:0);
+          const remaining=rows.filter((x)=>!cursor||x.createdAt>cursor.at||(x.createdAt===cursor.at&&x.id>cursor.id));const data=remaining.slice(0,limit);const last=data.at(-1);
+          const nextCursor=remaining.length>limit?Buffer.from(JSON.stringify({context,at:last.createdAt,id:last.id})).toString('base64url'):null;
+          return sendJson(res,200,{data,page:{nextCursor,total:rows.length},incidentRevision:incident.revision},{etag:incidentEtag(incident)});
+        }
+        await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});
+        const action=resource==='communication-plan'&&req.method==='PATCH'?'communication':resource==='commander/reassign'&&req.method==='POST'?'reassign':resource==='tasks'?(req.method==='POST'&&!entityId?'taskCreate':req.method==='PATCH'&&entityId&&!decision?'taskPatch':req.method==='POST'&&entityId&&decision==='reopen'?'taskReopen':null):(req.method==='POST'&&!entityId?'handoffCreate':req.method==='POST'&&entityId&&['accept','decline','cancel'].includes(decision)?`handoff${decision[0].toUpperCase()+decision.slice(1)}`:null);
+        if(!action)throw domainError('NOT_FOUND','Incident command not found.',404);
+        const expectedRevision=incidentPrecondition(req.headers['if-match'],incidentId,true);
+        const input=commandInput(action,await readJson(req));
+        const result=await store.incidentCommand(organizationId,incidentId,{action,input,entityId,actorUserId:user.id,expectedRevision});
+        if(result.changed)hub.publish(organizationId,{type:'incident.updated',incidentId,revision:result.incident.revision});
+        const entityKey=resource==='tasks'?'task':'handoff';
+        return sendJson(res,action.endsWith('Create')&&!result.replayed?201:200,{data:{...(result.entity?{[entityKey]:result.entity}:{}),incident:result.incident,revision:result.incident.revision},replayed:result.replayed},{etag:incidentEtag(result.incident)});
+      }
+
       const incidentItem=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)$/);
       if(incidentItem){
-        const user=requireUser(session),organizationId=incidentItem[1],incidentId=incidentItem[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});const current=await store.getIncident(organizationId,incidentId);if(!current)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);
-        if(req.method==='GET')return sendJson(res,200,{data:current});
+        const user=requireUser(session),organizationId=incidentItem[1],incidentId=incidentItem[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:readableRoles});
+        const current=await store.getIncident(organizationId,incidentId);if(!current)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);
+        if(req.method==='GET')return sendJson(res,200,{data:current},{etag:incidentEtag(current)});
         if(req.method==='PATCH'){
-          await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const patch=incidentPatch(await readJson(req));if(patch.status)assertIncidentTransition(current.status,patch.status);if(patch.affectedServiceIds||patch.affectedComponentIds)await validateReferences(store,organizationId,patch.affectedServiceIds??current.affectedServiceIds,patch.affectedComponentIds??current.affectedComponentIds);if('commanderUserId' in patch)await validateCommander(store,organizationId,patch.commanderUserId);
-          const events=[];
-          if(patch.severity&&patch.severity!==current.severity)events.push({actorUserId:user.id,eventType:'SEVERITY_CHANGED',message:`Severity changed from ${current.severity} to ${patch.severity}.`,metadata:{from:current.severity,to:patch.severity}});
-          if(patch.status&&patch.status!==current.status)events.push({actorUserId:user.id,eventType:patch.status==='RESOLVED'?'INCIDENT_RESOLVED':'STATUS_CHANGED',message:`Status changed from ${current.status} to ${patch.status}.`,metadata:{from:current.status,to:patch.status}});
-          if(patch.affectedServiceIds)events.push({actorUserId:user.id,eventType:'AFFECTED_SERVICES_CHANGED',message:'Affected services changed.',metadata:{serviceIds:patch.affectedServiceIds}});
-          if(patch.affectedComponentIds)events.push({actorUserId:user.id,eventType:'AFFECTED_COMPONENTS_CHANGED',message:'Affected components changed.',metadata:{componentIds:patch.affectedComponentIds}});
-          if('commanderUserId' in patch&&patch.commanderUserId!==current.commanderUserId)events.push({actorUserId:user.id,eventType:'COMMANDER_CHANGED',message:'Incident commander changed.',metadata:{commanderUserId:patch.commanderUserId}});
-          const updated=await store.updateIncident(organizationId,incidentId,patch,{affectedServiceIds:patch.affectedServiceIds,affectedComponentIds:patch.affectedComponentIds,events});let warning;if(patch.status==='RESOLVED'&&current.status!=='RESOLVED')warning=await notifyDiscord(organizationId,'resolved',updated);hub.publish(organizationId,{type:'incident.updated',incidentId});return sendJson(res,200,{data:updated,...(warning?{warnings:[warning]}:{})});
+          await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const patch=incidentPatch(await readJson(req));
+          if(patch.affectedServiceIds||patch.affectedComponentIds)await validateReferences(store,organizationId,patch.affectedServiceIds??[],patch.affectedComponentIds??[]);
+          const result=await store.incidentCommand(organizationId,incidentId,{action:'patch',input:patch,actorUserId:user.id,expectedRevision:incidentPrecondition(req.headers['if-match'],incidentId)});
+          const updated=result.incident;let warning;if(result.events.some((e)=>e.eventType==='INCIDENT_RESOLVED'))warning=await notifyDiscord(organizationId,'resolved',updated);
+          if(result.changed)hub.publish(organizationId,{type:'incident.updated',incidentId,revision:updated.revision});
+          return sendJson(res,200,{data:updated,...(warning?{warnings:[warning]}:{})},{etag:incidentEtag(updated)});
         }
       }
 
       const responderRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)\/responders$/);
       if(responderRoute&&req.method==='POST'){
-        const user=requireUser(session),organizationId=responderRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const body=object(await readJson(req));const target=body.userId?id(body.userId,'userId'):user.id;const targetMembership=await store.getMembership(organizationId,target);if(!targetMembership)throw domainError('INVALID_RESPONDER','Responder must be a member of the organization.',400);const incident=await store.addResponder(organizationId,responderRoute[2],target,user.id);if(!incident)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);hub.publish(organizationId,{type:'incident.updated',incidentId:responderRoute[2]});return sendJson(res,200,{data:incident});
+        const user=requireUser(session),organizationId=responderRoute[1],incidentId=responderRoute[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const body=object(await readJson(req));const target=body.userId?id(body.userId,'userId'):user.id;
+        const incident=await store.addResponder(organizationId,incidentId,target,user.id,{expectedRevision:incidentPrecondition(req.headers['if-match'],incidentId)});
+        hub.publish(organizationId,{type:'incident.updated',incidentId,revision:incident.revision});return sendJson(res,200,{data:incident},{etag:incidentEtag(incident)});
       }
 
       const updatesRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)\/updates$/);
       if(updatesRoute&&req.method==='POST'){
-        const user=requireUser(session),organizationId=updatesRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const body=object(await readJson(req));const message=string(body.message,'message',{min:1,max:5000});const isPublic=body.isPublic===true;const result=await store.addIncidentUpdate(organizationId,updatesRoute[2],{actorUserId:user.id,message,isPublic},{actorUserId:user.id,eventType:isPublic?'PUBLIC_UPDATE_PUBLISHED':'INTERNAL_NOTE_ADDED',message:isPublic?'Public update published.':'Internal note added.',metadata:{updateVisibility:isPublic?'PUBLIC':'INTERNAL'}});if(!result)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);const warning=isPublic?await notifyDiscord(organizationId,'update',result.incident,{message}):undefined;hub.publish(organizationId,{type:'incident.updated',incidentId:updatesRoute[2]});return sendJson(res,201,{data:result,...(warning?{warnings:[warning]}:{})});
+        const user=requireUser(session),organizationId=updatesRoute[1],incidentId=updatesRoute[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const body=object(await readJson(req));
+        const input={actorUserId:user.id,message:string(body.message,'message',{min:1,max:5000}),isPublic:body.isPublic===true};
+        if('nextPublicUpdateAt' in body)input.nextPublicUpdateAt=timestamp(body.nextPublicUpdateAt,'nextPublicUpdateAt');
+        if('reviewedScope' in body){if(!input.isPublic)throw domainError('VALIDATION_ERROR','Review scope is for public updates only.',400);const scope=object(body.reviewedScope);input.reviewedScope={componentIds:ids(scope.componentIds,'componentIds'),statusPageIds:ids(scope.statusPageIds,'statusPageIds')};}
+        const result=await store.addIncidentUpdate(organizationId,incidentId,input,null,{expectedRevision:incidentPrecondition(req.headers['if-match'],incidentId)});
+        const warning=input.isPublic?await notifyDiscord(organizationId,'update',result.incident,{message:input.message}):undefined;
+        hub.publish(organizationId,{type:'incident.updated',incidentId,revision:result.incident.revision});return sendJson(res,201,{data:result,...(warning?{warnings:[warning]}:{})},{etag:incidentEtag(result.incident)});
       }
 
       const resolveRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)\/resolve$/);
       if(resolveRoute&&req.method==='POST'){
-        const user=requireUser(session),organizationId=resolveRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const current=await store.getIncident(organizationId,resolveRoute[2]);if(!current)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);assertIncidentTransition(current.status,'RESOLVED');const updated=await store.updateIncident(organizationId,current.id,{status:'RESOLVED'},{events:[{actorUserId:user.id,eventType:'INCIDENT_RESOLVED',message:'Incident resolved.',metadata:{from:current.status,to:'RESOLVED'}}]});const warning=await notifyDiscord(organizationId,'resolved',updated);hub.publish(organizationId,{type:'incident.resolved',incidentId:current.id});return sendJson(res,200,{data:updated,...(warning?{warnings:[warning]}:{})});
+        const user=requireUser(session),organizationId=resolveRoute[1],incidentId=resolveRoute[2];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});
+        const result=await store.incidentCommand(organizationId,incidentId,{action:'patch',input:{status:'RESOLVED'},actorUserId:user.id,expectedRevision:incidentPrecondition(req.headers['if-match'],incidentId)});
+        const warning=result.changed?await notifyDiscord(organizationId,'resolved',result.incident):undefined;
+        if(result.changed)hub.publish(organizationId,{type:'incident.resolved',incidentId,revision:result.incident.revision});return sendJson(res,200,{data:result.incident,...(warning?{warnings:[warning]}:{})},{etag:incidentEtag(result.incident)});
       }
 
       const postmortemRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/incidents\/([a-zA-Z0-9_-]+)\/postmortem$/);
       if(postmortemRoute&&req.method==='PUT'){
-        const user=requireUser(session),organizationId=postmortemRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const incident=await store.getIncident(organizationId,postmortemRoute[2]);if(!incident)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);if(incident.status!=='RESOLVED')throw domainError('INCIDENT_NOT_RESOLVED','Postmortems can be created after incident resolution.',409);const body=object(await readJson(req));const input={title:string(body.title,'title',{min:3,max:200}),summary:string(body.summary??'','summary',{min:0,max:5000,optional:true})??'',impact:string(body.impact??'','impact',{min:0,max:10000,optional:true})??'',rootCause:string(body.rootCause??'','rootCause',{min:0,max:10000,optional:true})??'',resolution:string(body.resolution??'','resolution',{min:0,max:10000,optional:true})??'',followUpActions:Array.isArray(body.followUpActions)?body.followUpActions.slice(0,50).map((x)=>string(x,'followUpActions',{min:1,max:500})):[]};const updated=await store.upsertPostmortem(organizationId,incident.id,input,user.id);hub.publish(organizationId,{type:'incident.updated',incidentId:incident.id});return sendJson(res,200,{data:updated.postmortem});
+        const user=requireUser(session),organizationId=postmortemRoute[1];await requireOrgRole({store,userId:user.id,organizationId,allowed:responderRoles});const incident=await store.getIncident(organizationId,postmortemRoute[2]);if(!incident)throw domainError('INCIDENT_NOT_FOUND','Incident not found.',404);if(incident.status!=='RESOLVED')throw domainError('INCIDENT_NOT_RESOLVED','Postmortems can be created after incident resolution.',409);const body=object(await readJson(req));const input={title:string(body.title,'title',{min:3,max:200}),summary:string(body.summary??'','summary',{min:0,max:5000,optional:true})??'',impact:string(body.impact??'','impact',{min:0,max:10000,optional:true})??'',rootCause:string(body.rootCause??'','rootCause',{min:0,max:10000,optional:true})??'',resolution:string(body.resolution??'','resolution',{min:0,max:10000,optional:true})??'',followUpActions:Array.isArray(body.followUpActions)?body.followUpActions.slice(0,50).map((x)=>string(x,'followUpActions',{min:1,max:500})):[]};const updated=await store.upsertPostmortem(organizationId,incident.id,input,user.id,{expectedRevision:incidentPrecondition(req.headers['if-match'],incident.id)});hub.publish(organizationId,{type:'incident.updated',incidentId:incident.id});return sendJson(res,200,{data:updated.postmortem},{etag:incidentEtag(updated)});
       }
 
       const discordRoute=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/integrations\/discord$/);
@@ -519,7 +556,7 @@ export function createRelayServer({store,config,fetchImpl=fetch,hub=new Realtime
         const warning=await notifyDiscord(organizationId,'created',incident);
         hub.publish(organizationId,{type:'incident.created',incidentId:incident.id});
         hub.publish(organizationId,{type:'alert.routed',alertId});
-        return sendJson(res,201,{data:{...incident,sourceAlertId:alert.id},...(warning?{warnings:[warning]}:{})});
+        return sendJson(res,201,{data:{...incident,sourceAlertId:alert.id},...(warning?{warnings:[warning]}:{})},{etag:incidentEtag(incident)});
       }
 
       const alertRouting=route(pathname,/^\/api\/v1\/organizations\/([a-zA-Z0-9_-]+)\/alerts\/([a-zA-Z0-9_-]+)\/routing$/);
