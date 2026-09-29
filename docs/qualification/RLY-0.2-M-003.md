@@ -34,6 +34,7 @@ docker run --name relay-qual-pg -e POSTGRES_DB=relay_test -e POSTGRES_USER=relay
 $env:DATABASE_URL='postgres://relay:relay_test_password@127.0.0.1:5432/relay_test'
 npm run migrate
 npm test
+npm run verify
 
 $env:POSTGRES_PASSWORD='relay_compose_password'
 $env:APP_ORIGIN='http://127.0.0.1:4000'
@@ -71,6 +72,7 @@ database-backed rerun below supersedes it.
 | Source and release artifacts | `npm run build` | PASS; 31 JavaScript modules parsed; 51 browser CDP expressions parsed; version agreement checked |
 | Fresh migration | `npm run migrate` with disposable PostgreSQL 16 | PASS; `001_initial.sql`, `002_alert_routing_oncall.sql`, `003_escalation_delivery.sql` applied |
 | Complete automated suite | `npm test` with `DATABASE_URL` | PASS; **83 tests, 83 passed, 0 failed, 0 skipped** |
+| Final aggregate gate after documentation edits | `npm run verify` with `DATABASE_URL` | PASS; build, 83/83 database-backed tests, and secret scan |
 | Unit, auth, tenant and routing | Included in `npm test`: domain, security, authz, API integration, on-call, routing integration and routing E2E | PASS; cross-organization access and role boundaries exercised |
 | Durable delivery and providers | Included in `npm test`: `durable-delivery.test.mjs`, `providers.test.mjs`, `escalation.test.mjs` | PASS; retries, permanent failures, manual retry, acknowledgement cancellation and hostile notification text exercised |
 | PostgreSQL and migration contracts | Included in `npm test`: `postgres.contract.test.mjs`, `migration-upgrade.test.mjs` | PASS; populated 0.1 upgrade preserves data and 0.2 schema/store constraints hold |
@@ -112,9 +114,21 @@ published.
   neither tagging nor publishing.
 
 The local qualification has no technical blocker. GitHub's
-`release-verification` workflow is an independent Linux/Chrome check on the PR;
-its run and result are recorded below after it completes.
+`release-verification` workflow independently repeated the full gate on Linux
+with Node 22, PostgreSQL 16, Docker Compose and Chrome.
 
 ## PR workflow
 
-Pending PR creation.
+- [PR #6](https://github.com/MiniJe/Relay/pull/6), head commit
+  `ff39d77a6f7b65858e9dbd0509871e81a899a4c4`.
+- [Release-verification run 36614502121](https://github.com/MiniJe/Relay/actions/runs/36614502121):
+  **PASS** on 2026-09-29 18:48:27 UTC. Clean install, build, fresh migration,
+  complete PostgreSQL test suite, explicit schema/upgrade/timezone/routing
+  contracts, secret scan, Docker build/startup, release surface, Chrome browser,
+  production E2E and restart persistence all passed.
+- [Relay CI run 36614502082](https://github.com/MiniJe/Relay/actions/runs/36614502082):
+  **PASS** on the same head commit.
+
+GitHub reported non-blocking runner notices about Node.js 20 action runtime
+deprecation and an upcoming `ubuntu-latest` image change. They did not alter
+the qualification result; future workflow maintenance can address them.
